@@ -1,0 +1,5 @@
+source,subject,predicate,object,observed_at,confidence,note
+src:filing,company:acme,CEO,person:alice,2026-01-10T09:00:00Z,0.98,annual filing
+src:local-blog,company:acme,CEO,person:carol,2026-04-01T12:00:00Z,0.35,incorrect low-priority report
+src:acme-official,company:acme,CEO,person:bob,2026-09-02T08:00:00Z,0.99,official appointment
+

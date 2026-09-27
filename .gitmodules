@@ -1,0 +1,6 @@
+[submodule "external/datafusion"]
+	path = external/datafusion
+	url = https://github.com/apache/datafusion.git
+[submodule "external/redb"]
+	path = external/redb
+	url = https://github.com/cberner/redb.git

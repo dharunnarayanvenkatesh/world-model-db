@@ -1,0 +1,19 @@
+{"source":"src:registry","subject":"company:acme","predicate":"TYPE","object":"company","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"company:acme","predicate":"NAME","object":"Acme","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"company:nova","predicate":"TYPE","object":"company","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"company:nova","predicate":"NAME","object":"Nova Labs","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"person:alice","predicate":"NAME","object":"Alice","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"person:bob","predicate":"NAME","object":"Bob","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"person:carol","predicate":"NAME","object":"Carol","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"location:chennai","predicate":"NAME","object":"Chennai","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:registry","subject":"location:bengaluru","predicate":"NAME","object":"Bengaluru","observed_at":"2026-01-01T00:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100"}
+{"source":"src:filing","subject":"company:acme","predicate":"CEO","object":"person:alice","observed_at":"2026-01-10T09:00:00Z","confidence":0.98,"record_type":"observation","source_priority":"90","claim":"Alice is CEO of Acme"}
+{"source":"src:acme-official","subject":"company:acme","predicate":"CEO","object":"person:alice","observed_at":"2026-01-15T09:00:00Z","confidence":0.99,"record_type":"observation","source_priority":"100","claim":"Alice is CEO of Acme"}
+{"source":"src:local-blog","subject":"company:acme","predicate":"CEO","object":"person:carol","observed_at":"2026-04-01T12:00:00Z","confidence":0.35,"record_type":"observation","source_priority":"10","claim":"incorrect low-priority report"}
+{"source":"src:newswire","subject":"company:acme","predicate":"CEO","object":"person:bob","observed_at":"2026-09-01T12:00:00Z","confidence":0.96,"record_type":"observation","source_priority":"80","claim":"Bob becomes CEO of Acme"}
+{"source":"src:acme-official","subject":"company:acme","predicate":"CEO","object":"person:bob","observed_at":"2026-09-02T08:00:00Z","confidence":0.99,"record_type":"observation","source_priority":"100","claim":"Bob becomes CEO of Acme"}
+{"source":"src:nova-official","subject":"company:nova","predicate":"LOCATED_IN","object":"location:chennai","observed_at":"2026-01-05T08:00:00Z","confidence":0.99,"record_type":"observation","source_priority":"100","claim":"Nova Labs is located in Chennai"}
+{"source":"src:nova-official","subject":"company:nova","predicate":"LOCATED_IN","object":"location:bengaluru","observed_at":"2026-07-01T08:00:00Z","confidence":0.99,"record_type":"observation","source_priority":"100","claim":"Nova Labs moves to Bengaluru"}
+{"source":"src:filing","subject":"company:acme","predicate":"ACQUIRED","object":"company:nova","observed_at":"2026-09-15T10:30:00Z","confidence":0.99,"record_type":"observation","source_priority":"90","event_type":"ACQUISITION"}
+{"source":"src:acme-official","subject":"company:acme","predicate":"ACQUIRED","object":"company:nova","observed_at":"2026-09-15T11:00:00Z","confidence":1.0,"record_type":"observation","source_priority":"100","event_type":"ACQUISITION"}
+

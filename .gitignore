@@ -1,0 +1,9 @@
+/target/
+**/*.rs.bk
+*.wmdb
+*.wmdb.tmp
+*.redb
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

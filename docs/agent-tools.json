@@ -1,0 +1,107 @@
+{
+  "api_version": "v1",
+  "description": "Function-calling contracts for evidence-backed shared agent memory.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "wm_register_agent",
+        "description": "Register an AI agent as a first-class provenance source.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string" },
+            "name": { "type": "string" },
+            "model": { "type": "string" },
+            "capabilities": { "type": "array", "items": { "type": "string" } },
+            "priority": { "type": "integer", "default": 0 }
+          },
+          "required": ["agent_id", "name"]
+        }
+      },
+      "http": { "method": "POST", "path": "/agent/register" }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "wm_remember",
+        "description": "Append an idempotent, immutable agent memory with temporal and provenance metadata.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string" },
+            "session_id": { "type": "string" },
+            "idempotency_key": { "type": "string" },
+            "subject_entity_id": { "type": "string" },
+            "predicate": { "type": "string" },
+            "object": {},
+            "object_type": { "type": "string", "enum": ["string", "entity", "integer", "float", "boolean", "timestamp", "json"] },
+            "observed_at": { "type": "string", "description": "RFC 3339 UTC timestamp" },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+            "importance": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+            "tags": { "type": "array", "items": { "type": "string" } },
+            "memory_kind": { "type": "string", "enum": ["fact", "decision", "task", "preference", "reflection", "message"], "default": "fact" },
+            "raw_payload": { "type": "string" }
+          },
+          "required": ["agent_id", "session_id", "idempotency_key", "subject_entity_id", "predicate", "object", "observed_at"]
+        }
+      },
+      "http": { "method": "POST", "path": "/agent/memory" }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "wm_context",
+        "description": "Build a compact, ranked and token-budget-friendly world context bundle for an agent.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "agent_id": { "type": "string" },
+            "session_id": { "type": "string" },
+            "entity_ids": { "type": "array", "items": { "type": "string" } },
+            "predicates": { "type": "array", "items": { "type": "string" } },
+            "valid_at": { "type": "string" },
+            "known_at": { "type": "string" },
+            "max_facts": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 32 },
+            "char_budget": { "type": "integer", "minimum": 256, "maximum": 1000000, "default": 12000 },
+            "include_conflicts": { "type": "boolean", "default": true }
+          },
+          "required": ["agent_id"]
+        }
+      },
+      "http": { "method": "POST", "path": "/agent/context" }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "wm_explain",
+        "description": "Explain why a fact exists, including supporting and conflicting evidence.",
+        "parameters": {
+          "type": "object",
+          "properties": { "fact_id": { "type": "string" } },
+          "required": ["fact_id"]
+        }
+      },
+      "http": { "method": "GET", "path_template": "/facts/{fact_id}/why" }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "wm_path",
+        "description": "Find a bounded, temporally filtered relationship path between entities.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "from": { "type": "string" },
+            "to": { "type": "string" },
+            "max_depth": { "type": "integer", "minimum": 1, "default": 5 },
+            "relationship_type": { "type": "string" },
+            "valid_at": { "type": "string" }
+          },
+          "required": ["from", "to"]
+        }
+      },
+      "http": { "method": "GET", "path": "/graph/path" }
+    }
+  ]
+}

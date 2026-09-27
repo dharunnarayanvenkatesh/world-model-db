@@ -1,0 +1,10 @@
+{
+  "source": "src:acme-official",
+  "subject": "company:acme",
+  "predicate": "CEO",
+  "object": "person:bob",
+  "observed_at": "2026-09-02T08:00:00Z",
+  "confidence": 0.99,
+  "raw_payload": "Acme appoints Bob as CEO"
+}
+

@@ -1,0 +1,9 @@
+[package]
+name = "wm-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wm-core = { path = "../wm-core" }
+redb = { path = "../../external/redb", default-features = false, features = ["std"] }

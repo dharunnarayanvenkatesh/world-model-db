@@ -1,0 +1,12 @@
+[package]
+name = "wm-resolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wm-core = { path = "../wm-core" }
+wm-storage = { path = "../wm-storage" }
+wm-temporal = { path = "../wm-temporal" }
+wm-catalog = { path = "../wm-catalog" }
+

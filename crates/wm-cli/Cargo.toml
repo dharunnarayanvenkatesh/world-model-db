@@ -1,0 +1,17 @@
+[package]
+name = "wm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wm"
+path = "src/main.rs"
+
+[dependencies]
+wm-core = { path = "../wm-core" }
+wm-resolution = { path = "../wm-resolution" }
+wm-query = { path = "../wm-query" }
+wm-graph = { path = "../wm-graph" }
+wm-ingest = { path = "../wm-ingest" }
+wm-agent = { path = "../wm-agent" }
