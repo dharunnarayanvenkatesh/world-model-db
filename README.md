@@ -1,6 +1,5 @@
 # World Model DB
-
-**An open-source, agent-native database for shared, evidence-backed world state.**
+**agent-native database for shared, evidence-backed world state**
 
 World Model DB gives AI agents a durable memory that can answer more than
 "what was last written?" It stores observations, resolves them into temporal
@@ -275,6 +274,4 @@ dependency graph. Keep business rules in the core crates rather than transport
 adapters, and add deterministic tests for changes to resolution or time
 semantics.
 
-## License
 
-Licensed under the [Apache License 2.0](LICENSE).
