@@ -2,8 +2,10 @@
 
 `demo.jsonl` is the canonical V0 story in portable ingestion format. Every line
 is an immutable observation with the six required fields: `source`, `subject`,
-`predicate`, `object`, `observed_at`, and `confidence`. Additional fields are
-preserved as metadata. `record_type` is included for forward-compatible tooling;
+`predicate`, `object`, `observed_at`, and `confidence`. Optional
+`claimed_valid_from`, `claimed_valid_to`, and `cardinality` fields control
+valid-time resolution; they default to `observed_at`, open-ended, and `single`.
+Other additional fields are preserved as metadata. `record_type` is included for forward-compatible tooling;
 in V0 every line has the value `observation`.
 
 Load it into an initialized database:
@@ -42,4 +44,3 @@ ID construction.
 `observation.json` and `observations.csv` demonstrate the other V0 input formats.
 They overlap the main story and should be loaded into a fresh database when used
 as format examples.
-

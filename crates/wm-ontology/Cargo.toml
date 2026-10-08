@@ -1,5 +1,5 @@
 [package]
-name = "wm-resolution"
+name = "wm-ontology"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,5 +8,3 @@ license.workspace = true
 wm-core = { path = "../wm-core" }
 wm-storage = { path = "../wm-storage" }
 wm-temporal = { path = "../wm-temporal" }
-wm-catalog = { path = "../wm-catalog" }
-wm-ontology = { path = "../wm-ontology" }

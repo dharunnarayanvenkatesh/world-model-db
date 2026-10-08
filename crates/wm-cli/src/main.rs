@@ -104,6 +104,13 @@ fn agent_command(engine: &mut Engine, mut words: Vec<String>) -> Result<(), Stri
             let raw_object = required_option(&mut words, "--object")?;
             let object_type = take_option(&mut words, "--object-type");
             let observed_at = required_option(&mut words, "--observed-at")?;
+            let claimed_valid_from = take_option(&mut words, "--valid-from");
+            let claimed_valid_to = take_option(&mut words, "--valid-to");
+            let cardinality = parse_cardinality(
+                take_option(&mut words, "--cardinality")
+                    .as_deref()
+                    .unwrap_or("single"),
+            )?;
             let confidence = parse_f64_option(&mut words, "--confidence", 1.0)?;
             let importance = parse_f64_option(&mut words, "--importance", 0.5)?;
             let tags = take_all_options(&mut words, "--tag");
@@ -119,6 +126,9 @@ fn agent_command(engine: &mut Engine, mut words: Vec<String>) -> Result<(), Stri
                     predicate,
                     object: parse_object(&raw_object, object_type.as_deref()),
                     observed_at,
+                    claimed_valid_from,
+                    claimed_valid_to,
+                    cardinality,
                     confidence,
                     importance,
                     tags,
@@ -244,6 +254,9 @@ fn observe_command(engine: &mut Engine, mut words: Vec<String>) -> Result<(), St
         object: required_option(&mut words, "--object")?,
         source: required_option(&mut words, "--source")?,
         observed_at: required_option(&mut words, "--observed-at")?,
+        claimed_valid_from: take_option(&mut words, "--valid-from"),
+        claimed_valid_to: take_option(&mut words, "--valid-to"),
+        cardinality: take_option(&mut words, "--cardinality").unwrap_or_else(|| "single".into()),
         confidence: take_option(&mut words, "--confidence")
             .unwrap_or_else(|| "1.0".into())
             .parse()
@@ -359,6 +372,9 @@ fn append_record(
             object,
             observed_at: record.observed_at,
             ingested_at,
+            claimed_valid_from: record.claimed_valid_from,
+            claimed_valid_to: record.claimed_valid_to,
+            cardinality: parse_cardinality(&record.cardinality)?,
             confidence: record.confidence,
             raw_payload: record.raw_payload.unwrap_or_default(),
             metadata,
@@ -626,6 +642,15 @@ fn parse_object(value: &str, kind: Option<&str>) -> ObjectValue {
         Some("timestamp") => ObjectValue::Timestamp(value.into()),
         Some("json") => ObjectValue::Json(value.into()),
         _ => ObjectValue::String(value.into()),
+    }
+}
+fn parse_cardinality(value: &str) -> Result<PredicateCardinality, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "single" | "single_exclusive" | "single-exclusive" => {
+            Ok(PredicateCardinality::SingleExclusive)
+        }
+        "multi" | "multi_value" | "multi-value" => Ok(PredicateCardinality::MultiValue),
+        _ => Err("--cardinality must be single or multi".into()),
     }
 }
 fn object_text(value: &ObjectValue) -> String {

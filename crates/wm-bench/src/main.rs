@@ -319,6 +319,9 @@ fn observation(
         object: ObjectValue::Integer(index as i64),
         observed_at: timestamp(index),
         ingested_at: Some(timestamp(index)),
+        claimed_valid_from: None,
+        claimed_valid_to: None,
+        cardinality: wm_core::PredicateCardinality::SingleExclusive,
         confidence: 0.95,
         raw_payload: format!("benchmark-record-{index}"),
         metadata: BTreeMap::new(),
@@ -459,17 +462,33 @@ fn state_digest(engine: &Engine) -> u64 {
         hash ^= 0xff;
         hash = hash.wrapping_mul(0x100000001b3);
     };
+    add(&engine.store.state.schema_version.to_string());
+    for entity in &engine.store.state.entities {
+        add(&format!("{entity:?}"));
+    }
+    for source in &engine.store.state.sources {
+        add(&format!("{source:?}"));
+    }
     for observation in &engine.store.state.observations {
-        add(&observation.id.0);
-        add(&observation.subject_entity_id.0);
-        add(&observation.predicate);
-        add(&observation.observed_at);
+        add(&format!("{observation:?}"));
     }
     for fact in &engine.store.state.facts {
-        add(&fact.id.0);
-        add(&fact.subject_entity_id.0);
-        add(&fact.predicate);
-        add(&format!("{:?}", fact.status));
+        add(&format!("{fact:?}"));
+    }
+    for relationship in &engine.store.state.relationships {
+        add(&format!("{relationship:?}"));
+    }
+    for event in &engine.store.state.events {
+        add(&format!("{event:?}"));
+    }
+    for evidence in &engine.store.state.evidence {
+        add(&format!("{evidence:?}"));
+    }
+    for conflict in &engine.store.state.conflicts {
+        add(&format!("{conflict:?}"));
+    }
+    for correlation in &engine.store.state.correlations {
+        add(&format!("{correlation:?}"));
     }
     hash
 }

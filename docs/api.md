@@ -16,6 +16,7 @@ as the CLI. Business rules reside below the transport layer.
 | `GET` | `/entities/:id` | get an entity |
 | `POST` | `/observations` | append an immutable observation |
 | `GET` | `/observations/:id` | get an observation |
+| `POST` | `/relationships` | append a typed temporal relationship |
 | `GET` | `/facts` | filter facts, including temporal filters |
 | `GET` | `/facts/:id` | get a fact version |
 | `GET` | `/facts/:id/why` | explain provenance and resolution |
@@ -25,6 +26,19 @@ as the CLI. Business rules reside below the transport layer.
 | `GET` | `/conflicts/:id` | get a conflict and candidates |
 | `GET` | `/graph/path` | find a bounded temporal path |
 | `POST` | `/query` | submit a structured query operation |
+| `GET` | `/ontology` | summarize the formal ontology/world state |
+| `POST` | `/ontology/definitions` | register schema, module, type, rule, action, permission, or mapping |
+| `GET` | `/ontology/consistency` | validate schema and world invariants |
+| `POST` | `/ontology/materialize` | materialize computed facts and inferred links |
+| `GET` | `/ontology/entities/:id/computed` | evaluate computed properties |
+| `POST` | `/ontology/actions/:name/execute` | execute an atomic guarded action |
+| `POST` | `/ontology/resolve` | score and optionally persist entity equivalence |
+| `POST` | `/ontology/mappings/:id/apply` | map a source record into a typed semantic entity |
+| `GET` | `/ontology/authorized-entities` | return an object-level permission-filtered view |
+| `POST` | `/ontology/query` | semantic type/filter/traverse/temporal query |
+| `GET` | `/ontology/graph/blast-radius` | dependency closure from an entity |
+| `GET` | `/ontology/graph/shortest-path` | weighted semantic path |
+| `GET` | `/ontology/graph/centrality` | degree, betweenness, PageRank, and business weight |
 
 Query timestamps are RFC 3339 UTC. JSON responses use stable IDs and include
 schema/API version metadata. Creation returns `201`; successful reads return
@@ -44,12 +58,27 @@ Content-Type: application/json
   "predicate": "CEO",
   "object": { "entity_id": "person:bob" },
   "observed_at": "2026-09-01T12:00:00Z",
+  "claimed_valid_from": "2026-09-01T00:00:00Z",
+  "claimed_valid_to": null,
+  "cardinality": "single",
   "confidence": 0.99
 }
 ```
 
-The server assigns `ingested_at` if omitted. Reusing an observation ID with
-different content is a conflict, not an update.
+The server assigns `ingested_at` if omitted. `claimed_valid_from` defaults to
+`observed_at`; `claimed_valid_to` is exclusive and optional. `cardinality` is
+`single` (default) or `multi` and must remain consistent for one
+subject/predicate pair. RFC 3339 offsets are normalized to UTC.
+
+If the subject has a registered ontology type, the server parses the object as
+the property's declared value type and rejects unknown properties, type
+mismatches, and incompatible cardinality before appending the observation.
+
+## Enterprise ontology
+
+The ontology endpoints, compact definition syntax, action semantics,
+permissions, mappings, inference, and graph analysis are documented in the
+[ontology runtime guide](ontology.md).
 
 ## Agent memory
 
@@ -66,6 +95,8 @@ Content-Type: application/json
   "object": "supply chain",
   "object_type": "string",
   "observed_at": "2026-09-27T10:00:00Z",
+  "claimed_valid_from": "2026-09-27T00:00:00Z",
+  "cardinality": "single",
   "confidence": 0.9,
   "importance": 0.8,
   "tags": ["research", "planning"],
@@ -132,6 +163,7 @@ depend on these interfaces instead of reaching into storage internals.
 
 ## Operational warning
 
-V0 has no built-in authentication, authorization, TLS termination, quotas, or
-tenant isolation. Do not expose the server to an untrusted network. Bind it to a
+V0 evaluates configured object/action permission rules, but has no transport
+authentication, identity provider, TLS termination, quotas, or tenant
+isolation. Do not expose the server to an untrusted network. Bind it to a
 trusted interface or place it behind an appropriately configured gateway.

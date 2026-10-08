@@ -135,8 +135,10 @@ pub fn entity_state<'a>(
                         && matches!(fact.status, FactStatus::Supported | FactStatus::Superseded)
                 }
                 None => fact.known_to.is_none() && fact.status == FactStatus::Supported,
-            }) && valid_at
-                .is_none_or(|at| interval_contains(&fact.valid_from, fact.valid_to.as_deref(), at))
+            }) && match valid_at {
+                Some(at) => interval_contains(&fact.valid_from, fact.valid_to.as_deref(), at),
+                None => fact.valid_to.is_none(),
+            }
         })
         .collect()
 }

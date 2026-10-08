@@ -13,6 +13,11 @@ use wm_agent::{
     memory_receipt_json, session_memory_json,
 };
 use wm_core::*;
+use wm_ontology::{
+    SemanticQuery, authorized_entities, blast_radius, centrality, check_consistency,
+    computed_properties, effective_properties, formal_state_summary, semantic_query,
+    shortest_semantic_path,
+};
 use wm_resolution::{Engine, NewObservation, ResolutionEngine};
 
 fn main() {
@@ -73,7 +78,7 @@ fn route(engine: &mut Engine, request: Request) -> Response {
         match (request.method.as_str(), segments.as_slice()) {
             ("GET", []) => Ok((
                 200,
-                "{\"name\":\"World Model DB\",\"api_version\":\"v1\",\"agent_native\":true,\"capabilities\":[\"shared_memory\",\"bitemporal_context\",\"provenance\",\"conflicts\",\"multi_agent\"]}".into(),
+                "{\"name\":\"World Model DB\",\"api_version\":\"v1\",\"agent_native\":true,\"capabilities\":[\"shared_memory\",\"bitemporal_context\",\"provenance\",\"conflicts\",\"multi_agent\",\"typed_ontology\",\"inference\",\"guarded_actions\",\"object_security\",\"semantic_graph\"]}".into(),
             )),
             ("GET", ["agent", "tools"]) => Ok((200, wm_agent::tool_manifest_json().into())),
             ("POST", ["agent", "register"]) => post_agent_register(engine, &request.body),
@@ -88,6 +93,7 @@ fn route(engine: &mut Engine, request: Request) -> Response {
             ("GET", ["entities", id, "changes"]) => changes(engine, id, &request.query),
             ("POST", ["observations"]) => post_observation(engine, &request.body),
             ("GET", ["observations", id]) => get_observation(engine, id),
+            ("POST", ["relationships"]) => post_relationship(engine, &request.body),
             ("GET", ["facts"]) => list_facts(engine, &request.query),
             ("GET", ["facts", id, "why"]) => get_why(engine, id),
             ("GET", ["facts", id]) => get_fact(engine, id),
@@ -101,6 +107,33 @@ fn route(engine: &mut Engine, request: Request) -> Response {
                 .map(|c| (200, conflict_json(c)))
                 .ok_or((404, format!("conflict {id} not found"))),
             ("GET", ["graph", "path"]) => graph_path(engine, &request.query),
+            ("GET", ["ontology"]) => ontology_summary(engine),
+            ("POST", ["ontology", "definitions"]) => {
+                post_ontology_definition(engine, &request.body)
+            }
+            ("GET", ["ontology", "consistency"]) => ontology_consistency(engine),
+            ("POST", ["ontology", "materialize"]) => ontology_materialize(engine),
+            ("GET", ["ontology", "entities", id, "computed"]) => {
+                ontology_computed(engine, id)
+            }
+            ("POST", ["ontology", "actions", action, "execute"]) => {
+                ontology_execute_action(engine, action, &request.body)
+            }
+            ("POST", ["ontology", "resolve"]) => ontology_resolve(engine, &request.body),
+            ("POST", ["ontology", "mappings", id, "apply"]) => {
+                ontology_apply_mapping(engine, id, &request.body)
+            }
+            ("GET", ["ontology", "authorized-entities"]) => {
+                ontology_authorized_entities(engine, &request.query)
+            }
+            ("GET", ["ontology", "graph", "blast-radius"]) => {
+                ontology_blast_radius(engine, &request.query)
+            }
+            ("GET", ["ontology", "graph", "centrality"]) => ontology_centrality(engine),
+            ("GET", ["ontology", "graph", "shortest-path"]) => {
+                ontology_shortest_path(engine, &request.query)
+            }
+            ("POST", ["ontology", "query"]) => ontology_query(engine, &request.body),
             ("POST", ["query"]) => query(engine, &request.body),
             (method, _) if !matches!(method, "GET" | "POST") => {
                 Err((405, "method not allowed".into()))
@@ -167,6 +200,12 @@ fn post_agent_memory(engine: &mut Engine, body: &str) -> ApiResult {
     let memory_kind = values
         .remove("memory_kind")
         .unwrap_or_else(|| "fact".into());
+    let claimed_valid_from = values
+        .remove("claimed_valid_from")
+        .filter(|v| !v.is_empty());
+    let claimed_valid_to = values.remove("claimed_valid_to").filter(|v| !v.is_empty());
+    let cardinality =
+        parse_cardinality(values.remove("cardinality").as_deref().unwrap_or("single"))?;
     let receipt = AgentGateway::new(engine)
         .remember(AgentMemoryWrite {
             agent_id,
@@ -176,6 +215,9 @@ fn post_agent_memory(engine: &mut Engine, body: &str) -> ApiResult {
             predicate,
             object: agent_object(&raw_object, object_type.as_deref())?,
             observed_at,
+            claimed_valid_from,
+            claimed_valid_to,
+            cardinality,
             confidence,
             importance,
             tags,
@@ -249,8 +291,13 @@ fn post_entity(engine: &mut Engine, body: &str) -> ApiResult {
                 .collect()
         })
         .unwrap_or_default();
+    let attributes = values
+        .remove("attributes")
+        .map(|raw| parse_typed_attributes(engine, &entity_type, &raw))
+        .transpose()?
+        .unwrap_or_default();
     let id = engine
-        .create_entity(entity_type, name, aliases, BTreeMap::new())
+        .create_entity(entity_type, name, aliases, attributes)
         .map_err(engine_error)?;
     let entity = engine
         .store
@@ -274,15 +321,7 @@ fn post_observation(engine: &mut Engine, body: &str) -> ApiResult {
         .unwrap_or_else(|| "1.0".into())
         .parse::<f64>()
         .map_err(|_| (400, "confidence must be a number".into()))?;
-    let object = if raw_object.starts_with('{') {
-        let mut nested = wm_ingest::parse_object(&raw_object).map_err(|e| (400, e.to_string()))?;
-        nested
-            .remove("entity_id")
-            .map(|id| ObjectValue::Entity(id.into()))
-            .unwrap_or(ObjectValue::Json(raw_object))
-    } else {
-        ObjectValue::String(raw_object)
-    };
+    let object = parse_observation_object(engine, &subject, &predicate, &raw_object)?;
     let id = engine
         .observe(NewObservation {
             source_id: source.into(),
@@ -291,6 +330,11 @@ fn post_observation(engine: &mut Engine, body: &str) -> ApiResult {
             object,
             observed_at,
             ingested_at: values.remove("ingested_at"),
+            claimed_valid_from: values.remove("claimed_valid_from"),
+            claimed_valid_to: values.remove("claimed_valid_to"),
+            cardinality: parse_cardinality(
+                values.remove("cardinality").as_deref().unwrap_or("single"),
+            )?,
             confidence,
             raw_payload: values
                 .remove("raw_payload")
@@ -309,6 +353,37 @@ fn post_observation(engine: &mut Engine, body: &str) -> ApiResult {
         .find(|o| o.id == id)
         .expect("created observation");
     Ok((201, observation_json(observation)))
+}
+
+fn post_relationship(engine: &mut Engine, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let source = required_any(&mut values, &["source_entity_id", "source"])?;
+    let relationship_type = required_any(&mut values, &["relationship_type", "type"])?;
+    let target = required_any(&mut values, &["target_entity_id", "target"])?;
+    let valid_from = values
+        .remove("valid_from")
+        .unwrap_or_else(wm_resolution::now_utc);
+    let valid_to = values.remove("valid_to").filter(|value| !value.is_empty());
+    let confidence = number(&mut values, "confidence", 1.0)?;
+    let observation_ids = values
+        .remove("observation_ids")
+        .map(|raw| string_list(&raw).into_iter().map(Into::into).collect())
+        .unwrap_or_default();
+    let id = engine
+        .add_relationship(
+            source.into(),
+            relationship_type,
+            target.into(),
+            valid_from,
+            valid_to,
+            confidence,
+            observation_ids,
+        )
+        .map_err(engine_error)?;
+    Ok((
+        201,
+        format!("{{\"relationship_id\":\"{}\"}}", json_escape(id.as_str())),
+    ))
 }
 
 fn get_entity(engine: &Engine, id: &str) -> ApiResult {
@@ -455,6 +530,758 @@ fn query(engine: &Engine, body: &str) -> ApiResult {
         .map_err(|e| (400, e))
 }
 
+fn ontology_summary(engine: &Engine) -> ApiResult {
+    let summary = formal_state_summary(&engine.store.state);
+    Ok((
+        200,
+        format!(
+            "{{\"entities\":{},\"relationships\":{},\"schema_types\":{},\"constraints\":{},\"rules\":{},\"functions\":{},\"actions\":{},\"permissions\":{},\"history_records\":{},\"provenance_records\":{}}}",
+            summary.entities,
+            summary.relationships,
+            summary.schema_types,
+            summary.constraints,
+            summary.rules,
+            summary.functions,
+            summary.actions,
+            summary.permissions,
+            summary.history_records,
+            summary.provenance_records
+        ),
+    ))
+}
+
+fn post_ontology_definition(engine: &mut Engine, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let kind = required_any(&mut values, &["kind"])?;
+    match kind.as_str() {
+        "schema" => engine.register_schema(OntologySchemaVersion {
+            id: required_any(&mut values, &["id"])?.into(),
+            version: integer(&mut values, "version", 1)? as u32,
+            supersedes: values
+                .remove("supersedes")
+                .filter(|value| !value.is_empty())
+                .map(Into::into),
+            compatibility: parse_compatibility(
+                values
+                    .remove("compatibility")
+                    .as_deref()
+                    .unwrap_or("backward"),
+            )?,
+            created_at: values
+                .remove("created_at")
+                .unwrap_or_else(wm_resolution::now_utc),
+        }),
+        "module" => engine.register_module(OntologyModule {
+            id: required_any(&mut values, &["id"])?.into(),
+            namespace: required_any(&mut values, &["namespace"])?,
+            version: integer(&mut values, "version", 1)? as u32,
+            dependencies: values
+                .remove("dependencies")
+                .map(|raw| string_list(&raw).into_iter().map(Into::into).collect())
+                .unwrap_or_default(),
+        }),
+        "interface" => engine.register_interface(InterfaceDefinition {
+            name: required_any(&mut values, &["name"])?,
+            required_properties: parse_property_specs(
+                values.remove("properties").as_deref().unwrap_or(""),
+            )?,
+        }),
+        "object_type" => {
+            let identity_properties = values
+                .remove("identity_properties")
+                .map(|raw| string_list(&raw))
+                .unwrap_or_default();
+            let identity_weights = values
+                .remove("identity_weights")
+                .map(|raw| parse_float_list(&raw))
+                .transpose()?
+                .unwrap_or_default();
+            let identity = (!identity_properties.is_empty()).then(|| IdentityRule {
+                properties: identity_properties,
+                weights: identity_weights,
+                threshold: values
+                    .remove("identity_threshold")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0.8),
+            });
+            engine.register_object_type(ObjectTypeDefinition {
+                name: required_any(&mut values, &["name"])?,
+                namespace: values.remove("namespace").unwrap_or_else(|| "world".into()),
+                version: integer(&mut values, "version", 1)? as u32,
+                parent_types: values
+                    .remove("parents")
+                    .map(|raw| string_list(&raw))
+                    .unwrap_or_default(),
+                interfaces: values
+                    .remove("interfaces")
+                    .map(|raw| string_list(&raw))
+                    .unwrap_or_default(),
+                properties: parse_property_specs(
+                    values.remove("properties").as_deref().unwrap_or(""),
+                )?,
+                identity,
+                disjoint_with: values
+                    .remove("disjoint_with")
+                    .map(|raw| string_list(&raw))
+                    .unwrap_or_default(),
+            })
+        }
+        "relationship_type" => engine.register_relationship_type(RelationshipTypeDefinition {
+            name: required_any(&mut values, &["name"])?,
+            version: integer(&mut values, "version", 1)? as u32,
+            domain_types: values
+                .remove("domain")
+                .map(|raw| string_list(&raw))
+                .unwrap_or_default(),
+            range_types: values
+                .remove("range")
+                .map(|raw| string_list(&raw))
+                .unwrap_or_default(),
+            min_outgoing: integer(&mut values, "min_outgoing", 0)?,
+            max_outgoing: values
+                .remove("max_outgoing")
+                .filter(|raw| !raw.is_empty())
+                .map(|raw| {
+                    raw.parse()
+                        .map_err(|_| (400, "max_outgoing must be an integer".into()))
+                })
+                .transpose()?,
+            transitive: boolean(&mut values, "transitive", false)?,
+            symmetric: boolean(&mut values, "symmetric", false)?,
+            inverse_of: values
+                .remove("inverse_of")
+                .filter(|value| !value.is_empty()),
+            compositions: parse_composition_specs(
+                values.remove("compositions").as_deref().unwrap_or(""),
+            )?,
+            acyclic: boolean(&mut values, "acyclic", false)?,
+            connected: boolean(&mut values, "connected", false)?,
+            weight: number(&mut values, "weight", 1.0)?,
+        }),
+        "computed_property" => engine.register_computed_property(ComputedPropertyDefinition {
+            id: required_any(&mut values, &["id"])?.into(),
+            target_type: required_any(&mut values, &["target_type"])?,
+            property: required_any(&mut values, &["property"])?,
+            expression: required_any(&mut values, &["expression"])?,
+            materialized: boolean(&mut values, "materialized", false)?,
+        }),
+        "inference_rule" => engine.register_inference_rule(InferenceRule {
+            id: required_any(&mut values, &["id"])?.into(),
+            relationship_path: values
+                .remove("path")
+                .map(|raw| string_list(&raw))
+                .unwrap_or_default(),
+            implies_relationship: required_any(&mut values, &["implies"])?,
+            materialized: boolean(&mut values, "materialized", true)?,
+        }),
+        "derived_class" => engine.register_derived_class(DerivedClassDefinition {
+            name: required_any(&mut values, &["name"])?,
+            base_type: required_any(&mut values, &["base_type"])?,
+            conditions: parse_condition_specs(
+                values.remove("conditions").as_deref().unwrap_or(""),
+            )?,
+        }),
+        "action" => engine.register_action(ActionDefinition {
+            id: required_any(&mut values, &["id"])?.into(),
+            name: required_any(&mut values, &["name"])?,
+            target_type: required_any(&mut values, &["target_type"])?,
+            preconditions: parse_condition_specs(
+                values.remove("preconditions").as_deref().unwrap_or(""),
+            )?,
+            effects: parse_effect_specs(values.remove("effects").as_deref().unwrap_or(""))?,
+            postconditions: parse_condition_specs(
+                values.remove("postconditions").as_deref().unwrap_or(""),
+            )?,
+            allowed_roles: values
+                .remove("allowed_roles")
+                .map(|raw| string_list(&raw))
+                .unwrap_or_default(),
+        }),
+        "permission" => engine.register_permission(PermissionRule {
+            id: required_any(&mut values, &["id"])?.into(),
+            principal: values.remove("principal").filter(|value| !value.is_empty()),
+            role: values.remove("role").filter(|value| !value.is_empty()),
+            action: required_any(&mut values, &["action"])?,
+            object_type: values
+                .remove("object_type")
+                .filter(|value| !value.is_empty()),
+            object_id: values
+                .remove("object_id")
+                .filter(|value| !value.is_empty())
+                .map(Into::into),
+            conditions: parse_condition_specs(
+                values.remove("conditions").as_deref().unwrap_or(""),
+            )?,
+            effect: match values
+                .remove("effect")
+                .unwrap_or_else(|| "allow".into())
+                .as_str()
+            {
+                "allow" => PermissionEffect::Allow,
+                "deny" => PermissionEffect::Deny,
+                _ => return Err((400, "permission effect must be allow or deny".into())),
+            },
+            priority: values
+                .remove("priority")
+                .unwrap_or_else(|| "0".into())
+                .parse()
+                .map_err(|_| (400, "priority must be an integer".into()))?,
+        }),
+        "mapping" => engine.register_mapping(SchemaMapping {
+            id: required_any(&mut values, &["id"])?.into(),
+            source_namespace: required_any(&mut values, &["source_namespace"])?,
+            source_type: required_any(&mut values, &["source_type"])?,
+            target_type: required_any(&mut values, &["target_type"])?,
+            semantic_id_template: required_any(&mut values, &["semantic_id_template"])?,
+            fields: parse_mapping_specs(values.remove("fields").as_deref().unwrap_or(""))?,
+        }),
+        _ => {
+            return Err((
+                400,
+                format!("unsupported ontology definition kind '{kind}'"),
+            ));
+        }
+    }
+    .map_err(engine_error)?;
+    Ok((
+        201,
+        format!(
+            "{{\"kind\":\"{}\",\"registered\":true}}",
+            json_escape(&kind)
+        ),
+    ))
+}
+
+fn ontology_consistency(engine: &Engine) -> ApiResult {
+    let report = check_consistency(&engine.store.state);
+    Ok((
+        200,
+        format!(
+            "{{\"consistent\":{},\"checked_entities\":{},\"checked_relationships\":{},\"violations\":[{}]}}",
+            report.is_consistent(),
+            report.checked_entities,
+            report.checked_relationships,
+            report
+                .violations
+                .iter()
+                .map(|violation| format!(
+                    "{{\"code\":\"{}\",\"object_id\":\"{}\",\"message\":\"{}\"}}",
+                    json_escape(&violation.code),
+                    json_escape(&violation.object_id),
+                    json_escape(&violation.message)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    ))
+}
+
+fn ontology_materialize(engine: &mut Engine) -> ApiResult {
+    let (computed, inferred) = engine.materialize_ontology().map_err(engine_error)?;
+    Ok((
+        200,
+        format!("{{\"computed_facts\":{computed},\"inferred_relationships\":{inferred}}}"),
+    ))
+}
+
+fn ontology_computed(engine: &Engine, id: &str) -> ApiResult {
+    let values = computed_properties(&engine.store.state, &EntityId::from(id))
+        .map_err(|message| (404, message))?;
+    Ok((200, object_map_json(&values)))
+}
+
+fn ontology_execute_action(engine: &mut Engine, action: &str, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let actor = required_any(&mut values, &["actor", "agent_id"])?;
+    let target = required_any(&mut values, &["target_entity_id", "target"])?;
+    let roles = values
+        .remove("roles")
+        .map(|raw| string_list(&raw))
+        .unwrap_or_default();
+    let id = engine
+        .execute_ontology_action(action, &actor, &roles, &EntityId::from(target))
+        .map_err(engine_error)?;
+    Ok((
+        200,
+        format!(
+            "{{\"action_execution_id\":\"{}\",\"committed\":true}}",
+            json_escape(id.as_str())
+        ),
+    ))
+}
+
+fn ontology_resolve(engine: &mut Engine, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let left = required_any(&mut values, &["left", "left_entity_id"])?;
+    let right = required_any(&mut values, &["right", "right_entity_id"])?;
+    let persist = boolean(&mut values, "persist", false)?;
+    let result = engine
+        .resolve_entity_pair(&left.into(), &right.into(), persist)
+        .map_err(engine_error)?;
+    Ok((
+        200,
+        format!(
+            "{{\"left\":\"{}\",\"right\":\"{}\",\"score\":{},\"equivalent\":{},\"evidence\":[{}]}}",
+            json_escape(result.left.as_str()),
+            json_escape(result.right.as_str()),
+            result.score,
+            result.equivalent,
+            result
+                .evidence
+                .iter()
+                .map(|value| format!("\"{}\"", json_escape(value)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    ))
+}
+
+fn ontology_apply_mapping(engine: &mut Engine, id: &str, body: &str) -> ApiResult {
+    let record = fields(body)?;
+    let entity_id = engine
+        .apply_mapping(&SchemaMappingId::from(id), &record)
+        .map_err(engine_error)?;
+    let entity = engine
+        .store
+        .state
+        .entity(&entity_id)
+        .expect("mapped entity was just persisted");
+    Ok((200, entity_json(entity)))
+}
+
+fn ontology_authorized_entities(engine: &Engine, query: &BTreeMap<String, String>) -> ApiResult {
+    let principal = query
+        .get("principal")
+        .ok_or((400, "principal query parameter is required".into()))?;
+    let action = query.get("action").map(String::as_str).unwrap_or("read");
+    let roles = query
+        .get("roles")
+        .map(|raw| string_list(raw))
+        .unwrap_or_default();
+    let entities = authorized_entities(&engine.store.state, principal, &roles, action);
+    Ok((
+        200,
+        format!(
+            "[{}]",
+            entities
+                .iter()
+                .map(entity_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    ))
+}
+
+fn ontology_blast_radius(engine: &Engine, query: &BTreeMap<String, String>) -> ApiResult {
+    let root = query
+        .get("root")
+        .ok_or((400, "root query parameter is required".into()))?;
+    let depth = query
+        .get("max_depth")
+        .map(|raw| raw.parse())
+        .transpose()
+        .map_err(|_| (400, "max_depth must be an integer".into()))?
+        .unwrap_or(5);
+    Ok((
+        200,
+        ids_json(&blast_radius(
+            &engine.store.state,
+            &root.as_str().into(),
+            depth,
+        )),
+    ))
+}
+
+fn ontology_centrality(engine: &Engine) -> ApiResult {
+    Ok((
+        200,
+        format!(
+            "[{}]",
+            centrality(&engine.store.state)
+                .iter()
+                .map(|score| format!(
+                    "{{\"entity_id\":\"{}\",\"degree\":{},\"betweenness\":{},\"pagerank\":{},\"business_weight\":{}}}",
+                    json_escape(score.entity_id.as_str()),
+                    score.degree,
+                    score.betweenness,
+                    score.pagerank,
+                    score.business_weight
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    ))
+}
+
+fn ontology_shortest_path(engine: &Engine, query: &BTreeMap<String, String>) -> ApiResult {
+    let from = query
+        .get("from")
+        .ok_or((400, "from query parameter is required".into()))?;
+    let to = query
+        .get("to")
+        .ok_or((400, "to query parameter is required".into()))?;
+    let (cost, path) = shortest_semantic_path(
+        &engine.store.state,
+        &EntityId::from(from.as_str()),
+        &EntityId::from(to.as_str()),
+    )
+    .ok_or((404, "semantic path not found".into()))?;
+    Ok((
+        200,
+        format!("{{\"cost\":{cost},\"entities\":{}}}", ids_json(&path)),
+    ))
+}
+
+fn ontology_query(engine: &Engine, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let query = SemanticQuery {
+        object_type: values
+            .remove("object_type")
+            .filter(|value| !value.is_empty()),
+        conditions: parse_condition_specs(values.remove("conditions").as_deref().unwrap_or(""))?,
+        traverse_relationship: values
+            .remove("traverse_relationship")
+            .filter(|value| !value.is_empty()),
+        from_entity: values
+            .remove("from_entity")
+            .filter(|value| !value.is_empty())
+            .map(Into::into),
+        max_depth: integer(&mut values, "max_depth", 5)?,
+        valid_at: values.remove("valid_at").filter(|value| !value.is_empty()),
+        include_inferred: boolean(&mut values, "include_inferred", true)?,
+    };
+    let result = semantic_query(&engine.store.state, &query);
+    Ok((
+        200,
+        format!(
+            "{{\"entities\":[{}],\"relationships\":[{}],\"aggregates\":{}}}",
+            result.entities.iter().map(entity_json).collect::<Vec<_>>().join(","),
+            result
+                .relationships
+                .iter()
+                .map(|relationship| format!(
+                    "{{\"relationship_id\":\"{}\",\"source\":\"{}\",\"type\":\"{}\",\"target\":\"{}\",\"confidence\":{}}}",
+                    json_escape(relationship.id.as_str()),
+                    json_escape(relationship.source_entity_id.as_str()),
+                    json_escape(&relationship.relationship_type),
+                    json_escape(relationship.target_entity_id.as_str()),
+                    relationship.confidence
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            string_usize_map_json(&result.aggregates)
+        ),
+    ))
+}
+
+fn parse_typed_attributes(
+    engine: &Engine,
+    entity_type: &str,
+    raw: &str,
+) -> Result<BTreeMap<String, ObjectValue>, (u16, String)> {
+    let values = wm_ingest::parse_object(raw).map_err(|error| (400, error.to_string()))?;
+    if engine.store.state.ontology.object_types.is_empty() {
+        return Ok(values
+            .into_iter()
+            .map(|(key, value)| (key, ObjectValue::String(value)))
+            .collect());
+    }
+    let schemas = effective_properties(&engine.store.state.ontology, entity_type)
+        .map_err(|message| (400, message))?;
+    values
+        .into_iter()
+        .map(|(key, raw)| {
+            let schema = schemas
+                .get(&key)
+                .ok_or_else(|| (400, format!("property '{key}' is not declared")))?;
+            Ok((key, parse_typed_value(&raw, &schema.value_type)?))
+        })
+        .collect()
+}
+
+fn parse_observation_object(
+    engine: &Engine,
+    subject: &str,
+    predicate: &str,
+    raw: &str,
+) -> Result<ObjectValue, (u16, String)> {
+    if raw.starts_with('{') {
+        let mut nested = wm_ingest::parse_object(raw).map_err(|error| (400, error.to_string()))?;
+        return Ok(nested
+            .remove("entity_id")
+            .map(|id| ObjectValue::Entity(id.into()))
+            .unwrap_or_else(|| ObjectValue::Json(raw.into())));
+    }
+    if engine.store.state.ontology.object_types.is_empty() {
+        return Ok(ObjectValue::String(raw.into()));
+    }
+    let entity = engine
+        .store
+        .state
+        .entity(&EntityId::from(subject))
+        .ok_or((404, format!("entity {subject} not found")))?;
+    let properties = effective_properties(&engine.store.state.ontology, &entity.entity_type)
+        .map_err(|message| (400, message))?;
+    let schema = properties
+        .get(predicate)
+        .ok_or((400, format!("property '{predicate}' is not declared")))?;
+    parse_typed_value(raw, &schema.value_type)
+}
+
+fn parse_property_specs(raw: &str) -> Result<Vec<PropertySchema>, (u16, String)> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    raw.split(';')
+        .map(|item| {
+            let fields = item.split(':').collect::<Vec<_>>();
+            if !(2..=4).contains(&fields.len()) {
+                return Err((400, "property spec must be name:type[:min[:max]]".into()));
+            }
+            Ok(PropertySchema {
+                name: fields[0].trim().into(),
+                value_type: parse_value_type(fields[1].trim())?,
+                min_count: fields
+                    .get(2)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|_| (400, "property minimum must be an integer".into()))?
+                    .unwrap_or(0),
+                max_count: fields
+                    .get(3)
+                    .filter(|value| !value.is_empty() && **value != "*")
+                    .map(|value| value.parse())
+                    .transpose()
+                    .map_err(|_| (400, "property maximum must be an integer or *".into()))?,
+                allowed_values: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn parse_composition_specs(raw: &str) -> Result<Vec<RelationshipComposition>, (u16, String)> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    raw.split(';')
+        .map(|item| {
+            let (then_relationship, implies_relationship) = item
+                .split_once('>')
+                .ok_or((400, "composition spec must be then>implies".into()))?;
+            Ok(RelationshipComposition {
+                then_relationship: then_relationship.trim().into(),
+                implies_relationship: implies_relationship.trim().into(),
+            })
+        })
+        .collect()
+}
+
+fn parse_condition_specs(raw: &str) -> Result<Vec<Condition>, (u16, String)> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    raw.split(';')
+        .map(|item| {
+            let fields = item.splitn(4, ':').collect::<Vec<_>>();
+            if fields.len() < 2 {
+                return Err((
+                    400,
+                    "condition spec must be property:operator[:type:value]".into(),
+                ));
+            }
+            let operator = match fields[1] {
+                "eq" => ComparisonOperator::Equals,
+                "ne" => ComparisonOperator::NotEquals,
+                "gt" => ComparisonOperator::GreaterThan,
+                "ge" => ComparisonOperator::GreaterOrEqual,
+                "lt" => ComparisonOperator::LessThan,
+                "le" => ComparisonOperator::LessOrEqual,
+                "exists" => ComparisonOperator::Exists,
+                _ => return Err((400, format!("unknown comparison operator '{}'", fields[1]))),
+            };
+            let value = if operator == ComparisonOperator::Exists {
+                None
+            } else if fields.len() == 4 {
+                Some(parse_typed_value(fields[3], &parse_value_type(fields[2])?)?)
+            } else {
+                return Err((
+                    400,
+                    "non-existence condition requires type and value".into(),
+                ));
+            };
+            Ok(Condition {
+                property: fields[0].into(),
+                operator,
+                value,
+            })
+        })
+        .collect()
+}
+
+fn parse_effect_specs(raw: &str) -> Result<Vec<ActionEffect>, (u16, String)> {
+    if raw.trim().is_empty() {
+        return Err((400, "action effects cannot be empty".into()));
+    }
+    raw.split(';')
+        .map(|item| {
+            let fields = if item.starts_with("relationship:") {
+                item.splitn(3, ':').collect::<Vec<_>>()
+            } else {
+                item.splitn(4, ':').collect::<Vec<_>>()
+            };
+            match fields.as_slice() {
+                ["set", property, kind, value] => Ok(ActionEffect::SetProperty {
+                    property: (*property).into(),
+                    value: parse_typed_value(value, &parse_value_type(kind)?)?,
+                }),
+                ["remove", property] => Ok(ActionEffect::RemoveProperty {
+                    property: (*property).into(),
+                }),
+                ["relationship", relationship_type, target] => {
+                    Ok(ActionEffect::AddRelationship {
+                        relationship_type: (*relationship_type).into(),
+                        target_entity_id: (*target).into(),
+                    })
+                }
+                ["event", event_type] => Ok(ActionEffect::EmitEvent {
+                    event_type: (*event_type).into(),
+                }),
+                _ => Err((
+                    400,
+                    "effect must be set:property:type:value, remove:property, relationship:type:target, or event:type"
+                        .into(),
+                )),
+            }
+        })
+        .collect()
+}
+
+fn parse_mapping_specs(raw: &str) -> Result<Vec<FieldMapping>, (u16, String)> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    raw.split(';')
+        .map(|item| {
+            let fields = item.splitn(4, ':').collect::<Vec<_>>();
+            if fields.len() < 3 {
+                return Err((
+                    400,
+                    "mapping field must be source:target:transform[:argument]".into(),
+                ));
+            }
+            let transform = match fields[2] {
+                "identity" => FieldTransform::Identity,
+                "lowercase" => FieldTransform::Lowercase,
+                "uppercase" => FieldTransform::Uppercase,
+                "trim" => FieldTransform::Trim,
+                "prefix" if fields.len() == 4 => FieldTransform::Prefix(fields[3].into()),
+                other => return Err((400, format!("unsupported field transform '{other}'"))),
+            };
+            Ok(FieldMapping {
+                source_field: fields[0].into(),
+                target_property: fields[1].into(),
+                transform,
+            })
+        })
+        .collect()
+}
+
+fn parse_float_list(raw: &str) -> Result<Vec<f64>, (u16, String)> {
+    string_list(raw)
+        .into_iter()
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| (400, "identity_weights must contain numbers".into()))
+        })
+        .collect()
+}
+
+fn parse_compatibility(raw: &str) -> Result<CompatibilityMode, (u16, String)> {
+    match raw {
+        "backward" => Ok(CompatibilityMode::Backward),
+        "forward" => Ok(CompatibilityMode::Forward),
+        "full" => Ok(CompatibilityMode::Full),
+        "breaking" => Ok(CompatibilityMode::Breaking),
+        _ => Err((
+            400,
+            "compatibility must be backward, forward, full, or breaking".into(),
+        )),
+    }
+}
+
+fn parse_value_type(raw: &str) -> Result<ValueType, (u16, String)> {
+    match raw {
+        "entity" => Ok(ValueType::Entity),
+        "string" => Ok(ValueType::String),
+        "integer" => Ok(ValueType::Integer),
+        "float" => Ok(ValueType::Float),
+        "boolean" => Ok(ValueType::Boolean),
+        "timestamp" => Ok(ValueType::Timestamp),
+        "json" => Ok(ValueType::Json),
+        _ => Err((400, format!("unknown ontology value type '{raw}'"))),
+    }
+}
+
+fn parse_typed_value(raw: &str, value_type: &ValueType) -> Result<ObjectValue, (u16, String)> {
+    Ok(match value_type {
+        ValueType::Entity => ObjectValue::Entity(raw.into()),
+        ValueType::String => ObjectValue::String(raw.into()),
+        ValueType::Integer => ObjectValue::Integer(
+            raw.parse()
+                .map_err(|_| (400, format!("'{raw}' is not an integer")))?,
+        ),
+        ValueType::Float => ObjectValue::Float(
+            raw.parse()
+                .map_err(|_| (400, format!("'{raw}' is not a number")))?,
+        ),
+        ValueType::Boolean => ObjectValue::Boolean(
+            raw.parse()
+                .map_err(|_| (400, format!("'{raw}' is not a boolean")))?,
+        ),
+        ValueType::Timestamp => ObjectValue::Timestamp(raw.into()),
+        ValueType::Json => ObjectValue::Json(raw.into()),
+    })
+}
+
+fn object_map_json(values: &BTreeMap<String, ObjectValue>) -> String {
+    format!(
+        "{{{}}}",
+        values
+            .iter()
+            .map(|(key, value)| format!(
+                "\"{}\":{}",
+                json_escape(key),
+                wm_query::object_json(value)
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn string_usize_map_json(values: &BTreeMap<String, usize>) -> String {
+    format!(
+        "{{{}}}",
+        values
+            .iter()
+            .map(|(key, value)| format!("\"{}\":{}", json_escape(key), value))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn ids_json(values: &[EntityId]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|id| format!("\"{}\"", json_escape(id.as_str())))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
 type ApiResult = Result<(u16, String), (u16, String)>;
 fn fields(body: &str) -> Result<BTreeMap<String, String>, (u16, String)> {
     wm_ingest::parse_object(body).map_err(|e| (400, e.to_string()))
@@ -560,6 +1387,15 @@ fn agent_object(raw: &str, object_type: Option<&str>) -> Result<ObjectValue, (u1
         None => ObjectValue::String(raw.into()),
     })
 }
+fn parse_cardinality(value: &str) -> Result<PredicateCardinality, (u16, String)> {
+    match value.to_ascii_lowercase().as_str() {
+        "single" | "single_exclusive" | "single-exclusive" => {
+            Ok(PredicateCardinality::SingleExclusive)
+        }
+        "multi" | "multi_value" | "multi-value" => Ok(PredicateCardinality::MultiValue),
+        _ => Err((400, "cardinality must be single or multi".into())),
+    }
+}
 fn take_option(args: &mut Vec<String>, name: &str) -> Option<String> {
     let i = args.iter().position(|v| v == name)?;
     args.remove(i);
@@ -583,7 +1419,7 @@ fn entity_json(v: &Entity) -> String {
 }
 fn observation_json(v: &Observation) -> String {
     format!(
-        "{{\"observation_id\":\"{}\",\"source_id\":\"{}\",\"subject_entity_id\":\"{}\",\"predicate\":\"{}\",\"object\":{},\"observed_at\":\"{}\",\"ingested_at\":\"{}\",\"confidence\":{},\"retracted\":{}}}",
+        "{{\"observation_id\":\"{}\",\"source_id\":\"{}\",\"subject_entity_id\":\"{}\",\"predicate\":\"{}\",\"object\":{},\"observed_at\":\"{}\",\"ingested_at\":\"{}\",\"claimed_valid_from\":\"{}\",\"claimed_valid_to\":{},\"cardinality\":\"{:?}\",\"confidence\":{},\"retracted\":{}}}",
         json_escape(v.id.as_str()),
         json_escape(v.source_id.as_str()),
         json_escape(v.subject_entity_id.as_str()),
@@ -591,6 +1427,9 @@ fn observation_json(v: &Observation) -> String {
         wm_query::object_json(&v.object),
         v.observed_at,
         v.ingested_at,
+        v.claimed_valid_from,
+        json_opt(v.claimed_valid_to.as_deref()),
+        v.cardinality,
         v.confidence,
         v.retracted
     )
@@ -681,6 +1520,90 @@ mod tests {
             assert_eq!(context.status, 200);
             assert!(context.body.contains("\"agent_ids\":[\"researcher\"]"));
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn ontology_routes_enforce_schema_and_execute_guarded_actions() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("wm-server-ontology-{nonce}.redb"));
+        {
+            let mut engine = Engine::init(&path).unwrap();
+            let registered = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/ontology/definitions",
+                    r#"{"kind":"object_type","name":"company","namespace":"world","properties":"status:string:1:1"}"#,
+                ),
+            );
+            assert_eq!(registered.status, 201);
+            let invalid = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/entities",
+                    r#"{"type":"company","name":"Missing Status"}"#,
+                ),
+            );
+            assert_eq!(invalid.status, 400);
+            let created = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/entities",
+                    r#"{"type":"company","name":"Acme","attributes":{"status":"active"}}"#,
+                ),
+            );
+            assert_eq!(created.status, 201);
+            assert!(created.body.contains("company:acme"));
+            let action = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/ontology/definitions",
+                    r#"{"kind":"action","id":"action:close","name":"close","target_type":"company","preconditions":"status:eq:string:active","effects":"set:status:string:closed;event:company_closed","postconditions":"status:eq:string:closed","allowed_roles":["operator"]}"#,
+                ),
+            );
+            assert_eq!(action.status, 201);
+            let executed = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/ontology/actions/close/execute",
+                    r#"{"actor":"agent:ops","roles":["operator"],"target":"company:acme"}"#,
+                ),
+            );
+            assert_eq!(executed.status, 200);
+            assert_eq!(engine.store.state.ontology.action_executions.len(), 1);
+            let mapping = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/ontology/definitions",
+                    r#"{"kind":"mapping","id":"mapping:crm","source_namespace":"crm","source_type":"customer","target_type":"company","semantic_id_template":"crm:customer:{id}","fields":"state:status:identity"}"#,
+                ),
+            );
+            assert_eq!(mapping.status, 201);
+            let mapped = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/ontology/mappings/mapping:crm/apply",
+                    r#"{"id":"42","state":"active"}"#,
+                ),
+            );
+            assert_eq!(mapped.status, 200);
+            assert!(mapped.body.contains("crm:customer:42"));
+        }
+        let engine = Engine::open(&path).unwrap();
+        assert_eq!(engine.store.state.ontology.object_types.len(), 1);
+        assert_eq!(engine.store.state.ontology.actions.len(), 1);
+        assert_eq!(engine.store.state.ontology.mappings.len(), 1);
+        assert_eq!(engine.store.state.ontology.action_executions.len(), 1);
         std::fs::remove_file(path).unwrap();
     }
 }

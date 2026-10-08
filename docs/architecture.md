@@ -19,7 +19,7 @@ semantic boundaries, not distributed services.
 JSON / JSONL / CSV / REST
             |
             v
-     validation + normalization
+ schema mapping + type validation
             |
             v
     immutable observation log <--------------------+
@@ -79,6 +79,15 @@ storage traits keep a future backend from leaking into domain semantics.
 Groups comparable observations, creates candidates, detects conflicts, and
 chooses the preferred current belief using deterministic rules. It records every
 candidate, decision reason, input observation, and confidence component.
+
+### `wm-ontology`
+
+Turns the durable ontology catalog into executable behavior: inherited property
+contracts, domain/range/cardinality and graph constraints, deterministic entity
+resolution, computed properties, inference materialization, derived classes,
+guarded actions, permission predicates, schema mappings, consistency checks,
+semantic queries, and graph analytics. `wm-resolution::Engine` owns commits and
+calls this crate before accepting ontology-governed mutations.
 
 ### `wm-graph`
 
@@ -162,7 +171,10 @@ This is local durable persistence, not a distributed transaction protocol.
 All imported text and JSON values are untrusted data. Ingestion enforces size,
 type, timestamp, ID, and confidence constraints before persistence. V0 server
 deployments must be bound to a trusted interface or placed behind an authenticating
-reverse proxy because V0 provides no authentication or tenant isolation.
+reverse proxy because V0 provides no transport authentication or tenant
+isolation. Ontology allow/deny rules evaluate object and action authorization
+after the caller identity/roles have been supplied; they do not authenticate
+that identity.
 
 ## Dependency policy
 

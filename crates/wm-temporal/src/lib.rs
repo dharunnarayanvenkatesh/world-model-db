@@ -1,9 +1,10 @@
 //! Dependency-free validation and predicates for canonical RFC 3339 timestamps.
 //!
-//! Interval functions use half-open bounds (`from <= at < to`) and lexical
-//! comparison. Callers should therefore use one canonical representation (UTC
-//! with fixed-width fields is recommended) when ordering instants.
+//! Interval functions use half-open bounds (`from <= at < to`). Full RFC 3339
+//! instants are compared after conversion to UTC, so equivalent timestamps with
+//! different offsets have the same ordering.
 
+use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
 
@@ -100,6 +101,151 @@ pub fn is_valid_rfc3339(value: &str) -> bool {
     }
 }
 
+/// Converts a validated RFC 3339 instant to a fixed-width UTC representation.
+/// Fractional seconds are retained and trailing zeroes are removed.
+pub fn canonicalize_rfc3339(value: &str) -> Result<String, InvalidTimestamp> {
+    validate_rfc3339(value)?;
+    let bytes = value.as_bytes();
+    let year = decimal(bytes, 0, 4).unwrap() as i64;
+    let month = decimal(bytes, 5, 7).unwrap() as i64;
+    let day = decimal(bytes, 8, 10).unwrap() as i64;
+    let hour = decimal(bytes, 11, 13).unwrap() as i64;
+    let minute = decimal(bytes, 14, 16).unwrap() as i64;
+    let second = decimal(bytes, 17, 19).unwrap() as i64;
+    let timezone = value
+        .char_indices()
+        .skip(19)
+        .find(|(_, character)| matches!(character, 'Z' | 'z' | '+' | '-'))
+        .map(|(index, _)| index)
+        .unwrap();
+    let fraction = if bytes.get(19) == Some(&b'.') {
+        value[20..timezone].trim_end_matches('0')
+    } else {
+        ""
+    };
+    let offset_seconds = match bytes[timezone] {
+        b'+' => {
+            let h = decimal(bytes, timezone + 1, timezone + 3).unwrap() as i64;
+            let m = decimal(bytes, timezone + 4, timezone + 6).unwrap() as i64;
+            h * 3600 + m * 60
+        }
+        b'-' => {
+            let h = decimal(bytes, timezone + 1, timezone + 3).unwrap() as i64;
+            let m = decimal(bytes, timezone + 4, timezone + 6).unwrap() as i64;
+            -(h * 3600 + m * 60)
+        }
+        _ => 0,
+    };
+    let epoch = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
+        - offset_seconds;
+    let days = epoch.div_euclid(86_400);
+    let time = epoch.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    if !(0..=9999).contains(&year) {
+        return Err(InvalidTimestamp {
+            value: value.to_owned(),
+        });
+    }
+    let suffix = if fraction.is_empty() {
+        String::new()
+    } else {
+        format!(".{fraction}")
+    };
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}{suffix}Z",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    ))
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// Compares two RFC 3339 instants by UTC time, including arbitrary-precision
+/// fractional seconds. Returns `None` when either input is invalid.
+pub fn compare_rfc3339(left: &str, right: &str) -> Option<Ordering> {
+    let (left_seconds, left_fraction) = instant_parts(left)?;
+    let (right_seconds, right_fraction) = instant_parts(right)?;
+    Some(
+        left_seconds
+            .cmp(&right_seconds)
+            .then_with(|| compare_fraction(left_fraction, right_fraction)),
+    )
+}
+
+fn instant_parts(value: &str) -> Option<(i64, &str)> {
+    is_valid_rfc3339(value).then_some(())?;
+    let bytes = value.as_bytes();
+    let timezone = value
+        .char_indices()
+        .skip(19)
+        .find(|(_, character)| matches!(character, 'Z' | 'z' | '+' | '-'))?
+        .0;
+    let year = decimal(bytes, 0, 4)? as i64;
+    let month = decimal(bytes, 5, 7)? as i64;
+    let day = decimal(bytes, 8, 10)? as i64;
+    let hour = decimal(bytes, 11, 13)? as i64;
+    let minute = decimal(bytes, 14, 16)? as i64;
+    let second = decimal(bytes, 17, 19)? as i64;
+    let offset = match bytes[timezone] {
+        b'+' => {
+            decimal(bytes, timezone + 1, timezone + 3)? as i64 * 3600
+                + decimal(bytes, timezone + 4, timezone + 6)? as i64 * 60
+        }
+        b'-' => {
+            -(decimal(bytes, timezone + 1, timezone + 3)? as i64 * 3600
+                + decimal(bytes, timezone + 4, timezone + 6)? as i64 * 60)
+        }
+        _ => 0,
+    };
+    let fraction = if bytes.get(19) == Some(&b'.') {
+        &value[20..timezone]
+    } else {
+        ""
+    };
+    Some((
+        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset,
+        fraction,
+    ))
+}
+
+fn compare_fraction(left: &str, right: &str) -> Ordering {
+    let width = left.len().max(right.len());
+    left.bytes()
+        .chain(std::iter::repeat(b'0'))
+        .zip(right.bytes().chain(std::iter::repeat(b'0')))
+        .take(width)
+        .find_map(|(left, right)| (left != right).then(|| left.cmp(&right)))
+        .unwrap_or(Ordering::Equal)
+}
+
+fn compare_or_lexical(left: &str, right: &str) -> Ordering {
+    compare_rfc3339(left, right).unwrap_or_else(|| left.cmp(right))
+}
+
 fn decimal(bytes: &[u8], from: usize, to: usize) -> Option<u32> {
     let digits = bytes.get(from..to)?;
     digits.iter().all(u8::is_ascii_digit).then(|| {
@@ -125,7 +271,8 @@ fn is_leap_year(year: u32) -> bool {
 
 /// Returns whether `at` is in the half-open interval `[from, to)`.
 pub fn interval_contains(from: &str, to: Option<&str>, at: &str) -> bool {
-    from <= at && to.is_none_or(|exclusive_end| at < exclusive_end)
+    compare_or_lexical(from, at) != Ordering::Greater
+        && to.is_none_or(|exclusive_end| compare_or_lexical(at, exclusive_end) == Ordering::Less)
 }
 
 /// A synonym with the instant first, convenient for predicate-style call sites.
@@ -140,13 +287,16 @@ pub fn intervals_overlap(
     right_from: &str,
     right_to: Option<&str>,
 ) -> bool {
-    let left_is_nonempty = left_to.is_none_or(|left_end| left_from < left_end);
-    let right_is_nonempty = right_to.is_none_or(|right_end| right_from < right_end);
+    let left_is_nonempty =
+        left_to.is_none_or(|left_end| compare_or_lexical(left_from, left_end) == Ordering::Less);
+    let right_is_nonempty = right_to
+        .is_none_or(|right_end| compare_or_lexical(right_from, right_end) == Ordering::Less);
 
     left_is_nonempty
         && right_is_nonempty
-        && left_to.is_none_or(|left_end| right_from < left_end)
-        && right_to.is_none_or(|right_end| left_from < right_end)
+        && left_to.is_none_or(|left_end| compare_or_lexical(right_from, left_end) == Ordering::Less)
+        && right_to
+            .is_none_or(|right_end| compare_or_lexical(left_from, right_end) == Ordering::Less)
 }
 
 /// Returns whether both the valid-time and transaction-time intervals contain
@@ -213,6 +363,31 @@ mod tests {
         ] {
             assert!(!is_valid_rfc3339(invalid), "expected invalid: {invalid}");
         }
+    }
+
+    #[test]
+    fn canonicalizes_offsets_and_rolls_calendar_boundaries() {
+        assert_eq!(
+            canonicalize_rfc3339("2026-01-01T10:00:00+05:30").unwrap(),
+            "2026-01-01T04:30:00Z"
+        );
+        assert_eq!(
+            canonicalize_rfc3339("2025-12-31T23:30:00.1200-01:00").unwrap(),
+            "2026-01-01T00:30:00.12Z"
+        );
+        assert!(interval_contains(
+            "2026-01-01T04:00:00Z",
+            Some("2026-01-01T05:00:00Z"),
+            "2026-01-01T10:29:00+05:30"
+        ));
+        assert_eq!(
+            compare_rfc3339("2026-01-01T00:00:00Z", "2026-01-01T00:00:00.1Z"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_rfc3339("2026-01-01T00:00:00.10Z", "2026-01-01T00:00:00.1Z"),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]

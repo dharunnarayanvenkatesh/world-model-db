@@ -10,6 +10,7 @@ use std::fmt;
 
 use wm_core::*;
 use wm_resolution::{Engine, NewObservation, ResolutionEngine};
+use wm_temporal::canonicalize_rfc3339;
 
 const AGENT_ID: &str = "wm.agent_id";
 const SESSION_ID: &str = "wm.session_id";
@@ -36,6 +37,9 @@ pub struct AgentMemoryWrite {
     pub predicate: String,
     pub object: ObjectValue,
     pub observed_at: String,
+    pub claimed_valid_from: Option<String>,
+    pub claimed_valid_to: Option<String>,
+    pub cardinality: PredicateCardinality,
     pub confidence: f64,
     pub importance: f64,
     pub tags: Vec<String>,
@@ -160,13 +164,36 @@ impl<'a> AgentGateway<'a> {
             .map_err(map_engine_error)
     }
 
-    pub fn remember(&mut self, memory: AgentMemoryWrite) -> Result<AgentMemoryReceipt, AgentError> {
+    pub fn remember(
+        &mut self,
+        mut memory: AgentMemoryWrite,
+    ) -> Result<AgentMemoryReceipt, AgentError> {
+        memory.observed_at = canonicalize_rfc3339(&memory.observed_at)
+            .map_err(|error| AgentError::Invalid(error.to_string()))?;
+        memory.claimed_valid_from = memory
+            .claimed_valid_from
+            .map(|value| canonicalize_rfc3339(&value))
+            .transpose()
+            .map_err(|error| AgentError::Invalid(error.to_string()))?;
+        memory.claimed_valid_to = memory
+            .claimed_valid_to
+            .map(|value| canonicalize_rfc3339(&value))
+            .transpose()
+            .map_err(|error| AgentError::Invalid(error.to_string()))?;
         validate_memory(&memory)?;
         if let Some(existing) = find_idempotent_observation(&self.engine.store.state, &memory) {
+            let claimed_valid_from = memory
+                .claimed_valid_from
+                .as_deref()
+                .unwrap_or(&memory.observed_at);
             if existing.subject_entity_id != memory.subject_entity_id
                 || existing.predicate != memory.predicate
                 || existing.object != memory.object
                 || existing.observed_at != memory.observed_at
+                || existing.claimed_valid_from != claimed_valid_from
+                || existing.claimed_valid_to != memory.claimed_valid_to
+                || existing.cardinality != memory.cardinality
+                || existing.confidence != memory.confidence
             {
                 return Err(AgentError::IdempotencyConflict(format!(
                     "idempotency key '{}' was already used with different memory content",
@@ -210,6 +237,9 @@ impl<'a> AgentGateway<'a> {
                 object: memory.object,
                 observed_at: memory.observed_at,
                 ingested_at: None,
+                claimed_valid_from: memory.claimed_valid_from,
+                claimed_valid_to: memory.claimed_valid_to,
+                cardinality: memory.cardinality,
                 confidence: memory.confidence,
                 raw_payload: memory.raw_payload,
                 metadata,
@@ -688,6 +718,9 @@ mod tests {
             predicate: "RISK".into(),
             object: ObjectValue::String(object.into()),
             observed_at: "2026-09-27T10:00:00Z".into(),
+            claimed_valid_from: None,
+            claimed_valid_to: None,
+            cardinality: PredicateCardinality::SingleExclusive,
             confidence: 0.9,
             importance: 0.8,
             tags: vec!["research".into()],

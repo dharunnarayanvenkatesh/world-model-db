@@ -44,6 +44,9 @@ pub struct InputRecord {
     pub predicate: String,
     pub object: String,
     pub observed_at: String,
+    pub claimed_valid_from: Option<String>,
+    pub claimed_valid_to: Option<String>,
+    pub cardinality: String,
     pub confidence: f64,
     pub raw_payload: Option<String>,
     pub metadata: BTreeMap<String, String>,
@@ -257,12 +260,23 @@ fn map_to_record(mut values: BTreeMap<String, String>) -> Result<InputRecord, Pa
         return Err(ParseError::new("confidence must be between 0 and 1"));
     }
     let raw_payload = values.remove("raw_payload").filter(|v| !v.is_empty());
+    let claimed_valid_from = values
+        .remove("claimed_valid_from")
+        .filter(|v| !v.is_empty());
+    let claimed_valid_to = values.remove("claimed_valid_to").filter(|v| !v.is_empty());
+    let cardinality = values
+        .remove("cardinality")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "single".into());
     Ok(InputRecord {
         source,
         subject,
         predicate,
         object,
         observed_at,
+        claimed_valid_from,
+        claimed_valid_to,
+        cardinality,
         confidence,
         raw_payload,
         metadata: values,

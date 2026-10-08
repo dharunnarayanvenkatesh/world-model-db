@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableError};
 use wm_core::*;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 const STATE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wm_state");
 const STATE_KEY: &str = "canonical_snapshot";
 const RECORDS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wm_records");
@@ -31,6 +31,7 @@ pub struct WorldState {
     pub evidence: Vec<Evidence>,
     pub conflicts: Vec<Conflict>,
     pub correlations: Vec<Correlation>,
+    pub ontology: OntologyCatalog,
     pub counters: BTreeMap<String, u64>,
     indexes: WorldIndexes,
 }
@@ -66,6 +67,7 @@ impl Default for WorldState {
             evidence: Vec::new(),
             conflicts: Vec::new(),
             correlations: Vec::new(),
+            ontology: OntologyCatalog::default(),
             counters: BTreeMap::new(),
             indexes: WorldIndexes::default(),
         }
@@ -80,9 +82,11 @@ impl WorldState {
     }
 
     pub fn current_facts(&self) -> impl Iterator<Item = &Fact> {
-        self.facts
-            .iter()
-            .filter(|fact| fact.known_to.is_none() && fact.status == FactStatus::Supported)
+        self.facts.iter().filter(|fact| {
+            fact.known_to.is_none()
+                && fact.valid_to.is_none()
+                && fact.status == FactStatus::Supported
+        })
     }
 
     pub fn current_relationships(&self) -> impl Iterator<Item = &Relationship> {
@@ -501,6 +505,19 @@ fn record_kind_rank(kind: &str) -> u8 {
         "EVIDENCE" => 8,
         "CONFLICT" => 9,
         "CORRELATION" => 10,
+        "ONTOLOGY_SCHEMA" => 11,
+        "ONTOLOGY_MODULE" => 12,
+        "ONTOLOGY_INTERFACE" => 13,
+        "ONTOLOGY_TYPE" => 14,
+        "ONTOLOGY_RELATIONSHIP" => 15,
+        "ONTOLOGY_COMPUTED" => 16,
+        "ONTOLOGY_RULE" => 17,
+        "ONTOLOGY_DERIVED_CLASS" => 18,
+        "ONTOLOGY_ACTION" => 19,
+        "ONTOLOGY_PERMISSION" => 20,
+        "ONTOLOGY_MAPPING" => 21,
+        "ONTOLOGY_EXECUTION" => 22,
+        "ONTOLOGY_EQUIVALENCE" => 23,
         _ => u8::MAX,
     }
 }
@@ -571,6 +588,9 @@ fn encode_snapshot(state: &WorldState) -> String {
                 &object_value,
                 &o.observed_at,
                 &o.ingested_at,
+                &o.claimed_valid_from,
+                o.claimed_valid_to.as_deref().unwrap_or(""),
+                cardinality(&o.cardinality),
                 &o.confidence.to_string(),
                 &o.raw_payload,
                 &encode_map(&o.metadata),
@@ -678,12 +698,208 @@ fn encode_snapshot(state: &WorldState) -> String {
             ],
         ));
     }
+    for schema in &state.ontology.schemas {
+        lines.push(record(
+            "ONTOLOGY_SCHEMA",
+            &[
+                schema.id.as_str(),
+                &schema.version.to_string(),
+                schema
+                    .supersedes
+                    .as_ref()
+                    .map(|id| id.as_str())
+                    .unwrap_or(""),
+                compatibility_mode(&schema.compatibility),
+                &schema.created_at,
+            ],
+        ));
+    }
+    for module in &state.ontology.modules {
+        lines.push(record(
+            "ONTOLOGY_MODULE",
+            &[
+                module.id.as_str(),
+                &module.namespace,
+                &module.version.to_string(),
+                &join(
+                    &module
+                        .dependencies
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                ),
+            ],
+        ));
+    }
+    for interface in &state.ontology.interfaces {
+        lines.push(record(
+            "ONTOLOGY_INTERFACE",
+            &[
+                &interface.name,
+                &encode_properties(&interface.required_properties),
+            ],
+        ));
+    }
+    for definition in &state.ontology.object_types {
+        let key = format!("{}@{}", definition.name, definition.version);
+        lines.push(record(
+            "ONTOLOGY_TYPE",
+            &[
+                &key,
+                &definition.name,
+                &definition.namespace,
+                &definition.version.to_string(),
+                &join(&definition.parent_types),
+                &join(&definition.interfaces),
+                &encode_properties(&definition.properties),
+                &encode_identity(definition.identity.as_ref()),
+                &join(&definition.disjoint_with),
+            ],
+        ));
+    }
+    for definition in &state.ontology.relationship_types {
+        let key = format!("{}@{}", definition.name, definition.version);
+        lines.push(record(
+            "ONTOLOGY_RELATIONSHIP",
+            &[
+                &key,
+                &definition.name,
+                &definition.version.to_string(),
+                &join(&definition.domain_types),
+                &join(&definition.range_types),
+                &definition.min_outgoing.to_string(),
+                &definition
+                    .max_outgoing
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                bool_text(definition.transitive),
+                bool_text(definition.symmetric),
+                definition.inverse_of.as_deref().unwrap_or(""),
+                &encode_compositions(&definition.compositions),
+                bool_text(definition.acyclic),
+                bool_text(definition.connected),
+                &definition.weight.to_string(),
+            ],
+        ));
+    }
+    for definition in &state.ontology.computed_properties {
+        lines.push(record(
+            "ONTOLOGY_COMPUTED",
+            &[
+                definition.id.as_str(),
+                &definition.target_type,
+                &definition.property,
+                &definition.expression,
+                bool_text(definition.materialized),
+            ],
+        ));
+    }
+    for rule in &state.ontology.inference_rules {
+        lines.push(record(
+            "ONTOLOGY_RULE",
+            &[
+                rule.id.as_str(),
+                &join(&rule.relationship_path),
+                &rule.implies_relationship,
+                bool_text(rule.materialized),
+            ],
+        ));
+    }
+    for definition in &state.ontology.derived_classes {
+        lines.push(record(
+            "ONTOLOGY_DERIVED_CLASS",
+            &[
+                &definition.name,
+                &definition.base_type,
+                &encode_conditions(&definition.conditions),
+            ],
+        ));
+    }
+    for action in &state.ontology.actions {
+        lines.push(record(
+            "ONTOLOGY_ACTION",
+            &[
+                action.id.as_str(),
+                &action.name,
+                &action.target_type,
+                &encode_conditions(&action.preconditions),
+                &encode_effects(&action.effects),
+                &encode_conditions(&action.postconditions),
+                &join(&action.allowed_roles),
+            ],
+        ));
+    }
+    for permission in &state.ontology.permissions {
+        lines.push(record(
+            "ONTOLOGY_PERMISSION",
+            &[
+                permission.id.as_str(),
+                permission.principal.as_deref().unwrap_or(""),
+                permission.role.as_deref().unwrap_or(""),
+                &permission.action,
+                permission.object_type.as_deref().unwrap_or(""),
+                permission
+                    .object_id
+                    .as_ref()
+                    .map(|id| id.as_str())
+                    .unwrap_or(""),
+                &encode_conditions(&permission.conditions),
+                permission_effect(&permission.effect),
+                &permission.priority.to_string(),
+            ],
+        ));
+    }
+    for mapping in &state.ontology.mappings {
+        lines.push(record(
+            "ONTOLOGY_MAPPING",
+            &[
+                mapping.id.as_str(),
+                &mapping.source_namespace,
+                &mapping.source_type,
+                &mapping.target_type,
+                &mapping.semantic_id_template,
+                &encode_field_mappings(&mapping.fields),
+            ],
+        ));
+    }
+    for execution in &state.ontology.action_executions {
+        lines.push(record(
+            "ONTOLOGY_EXECUTION",
+            &[
+                execution.id.as_str(),
+                execution.action_id.as_str(),
+                &execution.actor,
+                &join(&execution.roles),
+                execution.target_entity_id.as_str(),
+                &execution.occurred_at,
+                bool_text(execution.succeeded),
+                &execution.message,
+                &encode_map(&execution.before),
+                &encode_map(&execution.after),
+            ],
+        ));
+    }
+    for equivalence in &state.ontology.equivalences {
+        let key = format!("{}={}", equivalence.left, equivalence.right);
+        lines.push(record(
+            "ONTOLOGY_EQUIVALENCE",
+            &[
+                &key,
+                equivalence.left.as_str(),
+                equivalence.right.as_str(),
+                &equivalence.score.to_string(),
+                &join(&equivalence.evidence),
+                &equivalence.resolved_at,
+            ],
+        ));
+    }
     lines.push(String::new());
     lines.join("\n")
 }
 
 fn decode_snapshot(input: &str) -> io::Result<WorldState> {
     let mut state = WorldState::default();
+    let mut source_schema = SCHEMA_VERSION;
     for (line_number, line) in input.lines().enumerate() {
         if line.is_empty() {
             continue;
@@ -700,8 +916,8 @@ fn decode_snapshot(input: &str) -> io::Result<WorldState> {
         };
         match fields.first().map(String::as_str) {
             Some("WMDB") => {
-                state.schema_version = field(&fields, 1)?.parse().map_err(|_| bad())?;
-                if state.schema_version != SCHEMA_VERSION {
+                source_schema = field(&fields, 1)?.parse().map_err(|_| bad())?;
+                if !(1..=SCHEMA_VERSION).contains(&source_schema) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "unsupported schema version",
@@ -732,19 +948,43 @@ fn decode_snapshot(input: &str) -> io::Result<WorldState> {
                 priority: field(&fields, 6)?.parse().map_err(|_| bad())?,
                 created_at: field(&fields, 7)?.to_owned(),
             }),
-            Some("OBSERVATION") => state.observations.push(Observation {
-                id: ObservationId(field(&fields, 1)?.to_owned()),
-                source_id: SourceId(field(&fields, 2)?.to_owned()),
-                subject_entity_id: EntityId(field(&fields, 3)?.to_owned()),
-                predicate: field(&fields, 4)?.to_owned(),
-                object: decode_object(field(&fields, 5)?, field(&fields, 6)?)?,
-                observed_at: field(&fields, 7)?.to_owned(),
-                ingested_at: field(&fields, 8)?.to_owned(),
-                confidence: field(&fields, 9)?.parse().map_err(|_| bad())?,
-                raw_payload: field(&fields, 10)?.to_owned(),
-                metadata: decode_map(field(&fields, 11)?)?,
-                retracted: field(&fields, 12)? == "1",
-            }),
+            Some("OBSERVATION") => {
+                let observed_at = field(&fields, 7)?.to_owned();
+                let (claimed_valid_from, claimed_valid_to, cardinality, confidence_index) =
+                    if source_schema >= 2 {
+                        (
+                            field(&fields, 9)?.to_owned(),
+                            optional(field(&fields, 10)?),
+                            parse_cardinality(field(&fields, 11)?)?,
+                            12,
+                        )
+                    } else {
+                        (
+                            observed_at.clone(),
+                            None,
+                            PredicateCardinality::SingleExclusive,
+                            9,
+                        )
+                    };
+                state.observations.push(Observation {
+                    id: ObservationId(field(&fields, 1)?.to_owned()),
+                    source_id: SourceId(field(&fields, 2)?.to_owned()),
+                    subject_entity_id: EntityId(field(&fields, 3)?.to_owned()),
+                    predicate: field(&fields, 4)?.to_owned(),
+                    object: decode_object(field(&fields, 5)?, field(&fields, 6)?)?,
+                    observed_at,
+                    ingested_at: field(&fields, 8)?.to_owned(),
+                    claimed_valid_from,
+                    claimed_valid_to,
+                    cardinality,
+                    confidence: field(&fields, confidence_index)?
+                        .parse()
+                        .map_err(|_| bad())?,
+                    raw_payload: field(&fields, confidence_index + 1)?.to_owned(),
+                    metadata: decode_map(field(&fields, confidence_index + 2)?)?,
+                    retracted: field(&fields, confidence_index + 3)? == "1",
+                });
+            }
             Some("FACT") => state.facts.push(Fact {
                 id: FactId(field(&fields, 1)?.to_owned()),
                 subject_entity_id: EntityId(field(&fields, 2)?.to_owned()),
@@ -828,9 +1068,134 @@ fn decode_snapshot(input: &str) -> io::Result<WorldState> {
                     .collect(),
                 created_at: field(&fields, 7)?.to_owned(),
             }),
+            Some("ONTOLOGY_SCHEMA") => state.ontology.schemas.push(OntologySchemaVersion {
+                id: OntologySchemaId::from(field(&fields, 1)?),
+                version: field(&fields, 2)?.parse().map_err(|_| bad())?,
+                supersedes: optional(field(&fields, 3)?).map(OntologySchemaId),
+                compatibility: parse_compatibility_mode(field(&fields, 4)?)?,
+                created_at: field(&fields, 5)?.to_owned(),
+            }),
+            Some("ONTOLOGY_MODULE") => state.ontology.modules.push(OntologyModule {
+                id: OntologyModuleId::from(field(&fields, 1)?),
+                namespace: field(&fields, 2)?.to_owned(),
+                version: field(&fields, 3)?.parse().map_err(|_| bad())?,
+                dependencies: split(field(&fields, 4)?)
+                    .into_iter()
+                    .map(OntologyModuleId)
+                    .collect(),
+            }),
+            Some("ONTOLOGY_INTERFACE") => state.ontology.interfaces.push(InterfaceDefinition {
+                name: field(&fields, 1)?.to_owned(),
+                required_properties: decode_properties(field(&fields, 2)?)?,
+            }),
+            Some("ONTOLOGY_TYPE") => state.ontology.object_types.push(ObjectTypeDefinition {
+                name: field(&fields, 2)?.to_owned(),
+                namespace: field(&fields, 3)?.to_owned(),
+                version: field(&fields, 4)?.parse().map_err(|_| bad())?,
+                parent_types: split(field(&fields, 5)?),
+                interfaces: split(field(&fields, 6)?),
+                properties: decode_properties(field(&fields, 7)?)?,
+                identity: decode_identity(field(&fields, 8)?)?,
+                disjoint_with: split(field(&fields, 9)?),
+            }),
+            Some("ONTOLOGY_RELATIONSHIP") => {
+                state
+                    .ontology
+                    .relationship_types
+                    .push(RelationshipTypeDefinition {
+                        name: field(&fields, 2)?.to_owned(),
+                        version: field(&fields, 3)?.parse().map_err(|_| bad())?,
+                        domain_types: split(field(&fields, 4)?),
+                        range_types: split(field(&fields, 5)?),
+                        min_outgoing: field(&fields, 6)?.parse().map_err(|_| bad())?,
+                        max_outgoing: optional(field(&fields, 7)?)
+                            .map(|value| value.parse().map_err(|_| bad()))
+                            .transpose()?,
+                        transitive: parse_bool(field(&fields, 8)?)?,
+                        symmetric: parse_bool(field(&fields, 9)?)?,
+                        inverse_of: optional(field(&fields, 10)?),
+                        compositions: decode_compositions(field(&fields, 11)?)?,
+                        acyclic: parse_bool(field(&fields, 12)?)?,
+                        connected: parse_bool(field(&fields, 13)?)?,
+                        weight: field(&fields, 14)?.parse().map_err(|_| bad())?,
+                    })
+            }
+            Some("ONTOLOGY_COMPUTED") => {
+                state
+                    .ontology
+                    .computed_properties
+                    .push(ComputedPropertyDefinition {
+                        id: OntologyRuleId::from(field(&fields, 1)?),
+                        target_type: field(&fields, 2)?.to_owned(),
+                        property: field(&fields, 3)?.to_owned(),
+                        expression: field(&fields, 4)?.to_owned(),
+                        materialized: parse_bool(field(&fields, 5)?)?,
+                    })
+            }
+            Some("ONTOLOGY_RULE") => state.ontology.inference_rules.push(InferenceRule {
+                id: OntologyRuleId::from(field(&fields, 1)?),
+                relationship_path: split(field(&fields, 2)?),
+                implies_relationship: field(&fields, 3)?.to_owned(),
+                materialized: parse_bool(field(&fields, 4)?)?,
+            }),
+            Some("ONTOLOGY_DERIVED_CLASS") => {
+                state.ontology.derived_classes.push(DerivedClassDefinition {
+                    name: field(&fields, 1)?.to_owned(),
+                    base_type: field(&fields, 2)?.to_owned(),
+                    conditions: decode_conditions(field(&fields, 3)?)?,
+                })
+            }
+            Some("ONTOLOGY_ACTION") => state.ontology.actions.push(ActionDefinition {
+                id: OntologyActionId::from(field(&fields, 1)?),
+                name: field(&fields, 2)?.to_owned(),
+                target_type: field(&fields, 3)?.to_owned(),
+                preconditions: decode_conditions(field(&fields, 4)?)?,
+                effects: decode_effects(field(&fields, 5)?)?,
+                postconditions: decode_conditions(field(&fields, 6)?)?,
+                allowed_roles: split(field(&fields, 7)?),
+            }),
+            Some("ONTOLOGY_PERMISSION") => state.ontology.permissions.push(PermissionRule {
+                id: PermissionRuleId::from(field(&fields, 1)?),
+                principal: optional(field(&fields, 2)?),
+                role: optional(field(&fields, 3)?),
+                action: field(&fields, 4)?.to_owned(),
+                object_type: optional(field(&fields, 5)?),
+                object_id: optional(field(&fields, 6)?).map(EntityId),
+                conditions: decode_conditions(field(&fields, 7)?)?,
+                effect: parse_permission_effect(field(&fields, 8)?)?,
+                priority: field(&fields, 9)?.parse().map_err(|_| bad())?,
+            }),
+            Some("ONTOLOGY_MAPPING") => state.ontology.mappings.push(SchemaMapping {
+                id: SchemaMappingId::from(field(&fields, 1)?),
+                source_namespace: field(&fields, 2)?.to_owned(),
+                source_type: field(&fields, 3)?.to_owned(),
+                target_type: field(&fields, 4)?.to_owned(),
+                semantic_id_template: field(&fields, 5)?.to_owned(),
+                fields: decode_field_mappings(field(&fields, 6)?)?,
+            }),
+            Some("ONTOLOGY_EXECUTION") => state.ontology.action_executions.push(ActionExecution {
+                id: ActionExecutionId::from(field(&fields, 1)?),
+                action_id: OntologyActionId::from(field(&fields, 2)?),
+                actor: field(&fields, 3)?.to_owned(),
+                roles: split(field(&fields, 4)?),
+                target_entity_id: EntityId::from(field(&fields, 5)?),
+                occurred_at: field(&fields, 6)?.to_owned(),
+                succeeded: parse_bool(field(&fields, 7)?)?,
+                message: field(&fields, 8)?.to_owned(),
+                before: decode_map(field(&fields, 9)?)?,
+                after: decode_map(field(&fields, 10)?)?,
+            }),
+            Some("ONTOLOGY_EQUIVALENCE") => state.ontology.equivalences.push(EntityEquivalence {
+                left: EntityId::from(field(&fields, 2)?),
+                right: EntityId::from(field(&fields, 3)?),
+                score: field(&fields, 4)?.parse().map_err(|_| bad())?,
+                evidence: split(field(&fields, 5)?),
+                resolved_at: field(&fields, 6)?.to_owned(),
+            }),
             _ => return Err(bad()),
         }
     }
+    state.schema_version = SCHEMA_VERSION;
     state.sync_indexes();
     Ok(state)
 }
@@ -915,6 +1280,438 @@ fn join_entity_ids(values: &[EntityId]) -> String {
     join(&values.iter().map(|v| v.0.clone()).collect::<Vec<_>>())
 }
 
+fn bool_text(value: bool) -> &'static str {
+    if value { "1" } else { "0" }
+}
+
+fn parse_bool(value: &str) -> io::Result<bool> {
+    match value {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid boolean",
+        )),
+    }
+}
+
+fn value_type(value: &ValueType) -> &'static str {
+    match value {
+        ValueType::Entity => "entity",
+        ValueType::String => "string",
+        ValueType::Integer => "integer",
+        ValueType::Float => "float",
+        ValueType::Boolean => "boolean",
+        ValueType::Timestamp => "timestamp",
+        ValueType::Json => "json",
+    }
+}
+
+fn parse_value_type(value: &str) -> io::Result<ValueType> {
+    match value {
+        "entity" => Ok(ValueType::Entity),
+        "string" => Ok(ValueType::String),
+        "integer" => Ok(ValueType::Integer),
+        "float" => Ok(ValueType::Float),
+        "boolean" => Ok(ValueType::Boolean),
+        "timestamp" => Ok(ValueType::Timestamp),
+        "json" => Ok(ValueType::Json),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid value type",
+        )),
+    }
+}
+
+fn encode_object_values(values: &[ObjectValue]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            let (kind, raw) = encode_object(value);
+            format!("{kind}^{}", escape(&raw))
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn decode_object_values(value: &str) -> io::Result<Vec<ObjectValue>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(';')
+        .map(|item| {
+            let (kind, raw) = item.split_once('^').ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid allowed value")
+            })?;
+            decode_object(kind, &unescape(raw)?)
+        })
+        .collect()
+}
+
+fn encode_properties(values: &[PropertySchema]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            format!(
+                "{}~{}~{}~{}~{}",
+                escape(&value.name),
+                value_type(&value.value_type),
+                value.min_count,
+                value.max_count.map(|v| v.to_string()).unwrap_or_default(),
+                encode_object_values(&value.allowed_values)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn decode_properties(value: &str) -> io::Result<Vec<PropertySchema>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split('|')
+        .map(|item| {
+            let fields = item.splitn(5, '~').collect::<Vec<_>>();
+            if fields.len() != 5 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid property schema",
+                ));
+            }
+            Ok(PropertySchema {
+                name: unescape(fields[0])?,
+                value_type: parse_value_type(fields[1])?,
+                min_count: fields[2].parse().map_err(|_| io::ErrorKind::InvalidData)?,
+                max_count: optional(fields[3])
+                    .map(|raw| {
+                        raw.parse()
+                            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+                    })
+                    .transpose()?,
+                allowed_values: decode_object_values(fields[4])?,
+            })
+        })
+        .collect()
+}
+
+fn encode_identity(value: Option<&IdentityRule>) -> String {
+    value
+        .map(|identity| {
+            format!(
+                "{}~{}~{}",
+                join(&identity.properties),
+                identity
+                    .weights
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                identity.threshold
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn decode_identity(value: &str) -> io::Result<Option<IdentityRule>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let fields = value.splitn(3, '~').collect::<Vec<_>>();
+    if fields.len() != 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid identity rule",
+        ));
+    }
+    let weights = if fields[1].is_empty() {
+        Vec::new()
+    } else {
+        fields[1]
+            .split(',')
+            .map(|weight| {
+                weight
+                    .parse()
+                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+            })
+            .collect::<io::Result<Vec<_>>>()?
+    };
+    Ok(Some(IdentityRule {
+        properties: split(fields[0]),
+        weights,
+        threshold: fields[2].parse().map_err(|_| io::ErrorKind::InvalidData)?,
+    }))
+}
+
+fn encode_compositions(values: &[RelationshipComposition]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            format!(
+                "{}~{}",
+                escape(&value.then_relationship),
+                escape(&value.implies_relationship)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn decode_compositions(value: &str) -> io::Result<Vec<RelationshipComposition>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split('|')
+        .map(|item| {
+            let (then_relationship, implies_relationship) =
+                item.split_once('~').ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid relationship composition",
+                    )
+                })?;
+            Ok(RelationshipComposition {
+                then_relationship: unescape(then_relationship)?,
+                implies_relationship: unescape(implies_relationship)?,
+            })
+        })
+        .collect()
+}
+
+fn comparison_operator(value: &ComparisonOperator) -> &'static str {
+    match value {
+        ComparisonOperator::Equals => "eq",
+        ComparisonOperator::NotEquals => "ne",
+        ComparisonOperator::GreaterThan => "gt",
+        ComparisonOperator::GreaterOrEqual => "ge",
+        ComparisonOperator::LessThan => "lt",
+        ComparisonOperator::LessOrEqual => "le",
+        ComparisonOperator::Exists => "exists",
+    }
+}
+
+fn parse_comparison_operator(value: &str) -> io::Result<ComparisonOperator> {
+    match value {
+        "eq" => Ok(ComparisonOperator::Equals),
+        "ne" => Ok(ComparisonOperator::NotEquals),
+        "gt" => Ok(ComparisonOperator::GreaterThan),
+        "ge" => Ok(ComparisonOperator::GreaterOrEqual),
+        "lt" => Ok(ComparisonOperator::LessThan),
+        "le" => Ok(ComparisonOperator::LessOrEqual),
+        "exists" => Ok(ComparisonOperator::Exists),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid comparison operator",
+        )),
+    }
+}
+
+fn encode_conditions(values: &[Condition]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            let (kind, raw) = value
+                .value
+                .as_ref()
+                .map(encode_object)
+                .unwrap_or(("", String::new()));
+            format!(
+                "{}~{}~{}~{}",
+                escape(&value.property),
+                comparison_operator(&value.operator),
+                kind,
+                escape(&raw)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn decode_conditions(value: &str) -> io::Result<Vec<Condition>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split('|')
+        .map(|item| {
+            let fields = item.splitn(4, '~').collect::<Vec<_>>();
+            if fields.len() != 4 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid condition",
+                ));
+            }
+            Ok(Condition {
+                property: unescape(fields[0])?,
+                operator: parse_comparison_operator(fields[1])?,
+                value: if fields[2].is_empty() {
+                    None
+                } else {
+                    Some(decode_object(fields[2], &unescape(fields[3])?)?)
+                },
+            })
+        })
+        .collect()
+}
+
+fn encode_effects(values: &[ActionEffect]) -> String {
+    values
+        .iter()
+        .map(|value| match value {
+            ActionEffect::SetProperty { property, value } => {
+                let (kind, raw) = encode_object(value);
+                format!("set~{}~{kind}~{}", escape(property), escape(&raw))
+            }
+            ActionEffect::RemoveProperty { property } => {
+                format!("remove~{}", escape(property))
+            }
+            ActionEffect::AddRelationship {
+                relationship_type,
+                target_entity_id,
+            } => format!(
+                "relationship~{}~{}",
+                escape(relationship_type),
+                escape(target_entity_id.as_str())
+            ),
+            ActionEffect::EmitEvent { event_type } => format!("event~{}", escape(event_type)),
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn decode_effects(value: &str) -> io::Result<Vec<ActionEffect>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split('|')
+        .map(|item| {
+            let fields = item.split('~').collect::<Vec<_>>();
+            match fields.as_slice() {
+                ["set", property, kind, raw] => Ok(ActionEffect::SetProperty {
+                    property: unescape(property)?,
+                    value: decode_object(kind, &unescape(raw)?)?,
+                }),
+                ["remove", property] => Ok(ActionEffect::RemoveProperty {
+                    property: unescape(property)?,
+                }),
+                ["relationship", relationship_type, target] => Ok(ActionEffect::AddRelationship {
+                    relationship_type: unescape(relationship_type)?,
+                    target_entity_id: EntityId(unescape(target)?),
+                }),
+                ["event", event_type] => Ok(ActionEffect::EmitEvent {
+                    event_type: unescape(event_type)?,
+                }),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid action effect",
+                )),
+            }
+        })
+        .collect()
+}
+
+fn encode_field_mappings(values: &[FieldMapping]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            let (kind, argument) = match &value.transform {
+                FieldTransform::Identity => ("identity", ""),
+                FieldTransform::Lowercase => ("lowercase", ""),
+                FieldTransform::Uppercase => ("uppercase", ""),
+                FieldTransform::Trim => ("trim", ""),
+                FieldTransform::Prefix(prefix) => ("prefix", prefix.as_str()),
+            };
+            format!(
+                "{}~{}~{}~{}",
+                escape(&value.source_field),
+                escape(&value.target_property),
+                kind,
+                escape(argument)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn decode_field_mappings(value: &str) -> io::Result<Vec<FieldMapping>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split('|')
+        .map(|item| {
+            let fields = item.splitn(4, '~').collect::<Vec<_>>();
+            if fields.len() != 4 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid field mapping",
+                ));
+            }
+            let transform = match fields[2] {
+                "identity" => FieldTransform::Identity,
+                "lowercase" => FieldTransform::Lowercase,
+                "uppercase" => FieldTransform::Uppercase,
+                "trim" => FieldTransform::Trim,
+                "prefix" => FieldTransform::Prefix(unescape(fields[3])?),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid field transform",
+                    ));
+                }
+            };
+            Ok(FieldMapping {
+                source_field: unescape(fields[0])?,
+                target_property: unescape(fields[1])?,
+                transform,
+            })
+        })
+        .collect()
+}
+
+fn compatibility_mode(value: &CompatibilityMode) -> &'static str {
+    match value {
+        CompatibilityMode::Backward => "backward",
+        CompatibilityMode::Forward => "forward",
+        CompatibilityMode::Full => "full",
+        CompatibilityMode::Breaking => "breaking",
+    }
+}
+
+fn parse_compatibility_mode(value: &str) -> io::Result<CompatibilityMode> {
+    match value {
+        "backward" => Ok(CompatibilityMode::Backward),
+        "forward" => Ok(CompatibilityMode::Forward),
+        "full" => Ok(CompatibilityMode::Full),
+        "breaking" => Ok(CompatibilityMode::Breaking),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid compatibility mode",
+        )),
+    }
+}
+
+fn permission_effect(value: &PermissionEffect) -> &'static str {
+    match value {
+        PermissionEffect::Allow => "allow",
+        PermissionEffect::Deny => "deny",
+    }
+}
+
+fn parse_permission_effect(value: &str) -> io::Result<PermissionEffect> {
+    match value {
+        "allow" => Ok(PermissionEffect::Allow),
+        "deny" => Ok(PermissionEffect::Deny),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid permission effect",
+        )),
+    }
+}
+
 fn encode_map(values: &BTreeMap<String, ObjectValue>) -> String {
     values
         .iter()
@@ -994,6 +1791,22 @@ fn parse_fact_status(value: &str) -> io::Result<FactStatus> {
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unknown fact status",
+        )),
+    }
+}
+fn cardinality(value: &PredicateCardinality) -> &'static str {
+    match value {
+        PredicateCardinality::SingleExclusive => "SINGLE_EXCLUSIVE",
+        PredicateCardinality::MultiValue => "MULTI_VALUE",
+    }
+}
+fn parse_cardinality(value: &str) -> io::Result<PredicateCardinality> {
+    match value {
+        "SINGLE_EXCLUSIVE" => Ok(PredicateCardinality::SingleExclusive),
+        "MULTI_VALUE" => Ok(PredicateCardinality::MultiValue),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown predicate cardinality",
         )),
     }
 }
@@ -1118,5 +1931,90 @@ mod tests {
             assert!(!store.persisted_hashes.is_empty());
         }
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn schema_one_observations_receive_safe_temporal_defaults() {
+        let snapshot = concat!(
+            "WMDB\t1\n",
+            "OBSERVATION\tobservation:1\tsrc:one\tcompany:acme\tNAME\tstring\tAcme\t",
+            "2026-01-01T00:00:00Z\t2026-01-02T00:00:00Z\t0.9\tpayload\t\t0\n"
+        );
+        let state = decode_snapshot(snapshot).unwrap();
+        assert_eq!(state.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            state.observations[0].claimed_valid_from,
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(state.observations[0].claimed_valid_to, None);
+        assert_eq!(
+            state.observations[0].cardinality,
+            PredicateCardinality::SingleExclusive
+        );
+    }
+
+    #[test]
+    fn ontology_catalog_round_trips_schema_three() {
+        let mut state = WorldState::default();
+        state.ontology.object_types.push(ObjectTypeDefinition {
+            name: "company".into(),
+            namespace: "enterprise".into(),
+            version: 1,
+            parent_types: vec!["organization".into()],
+            interfaces: vec!["ownable".into()],
+            properties: vec![PropertySchema {
+                name: "status".into(),
+                value_type: ValueType::String,
+                min_count: 1,
+                max_count: Some(1),
+                allowed_values: vec![ObjectValue::String("active|verified".into())],
+            }],
+            identity: Some(IdentityRule {
+                properties: vec!["registration_number".into()],
+                weights: vec![2.5],
+                threshold: 0.9,
+            }),
+            disjoint_with: vec!["person".into()],
+        });
+        state.ontology.actions.push(ActionDefinition {
+            id: "action:close".into(),
+            name: "close".into(),
+            target_type: "company".into(),
+            preconditions: vec![Condition {
+                property: "status".into(),
+                operator: ComparisonOperator::Equals,
+                value: Some(ObjectValue::String("active".into())),
+            }],
+            effects: vec![ActionEffect::SetProperty {
+                property: "status".into(),
+                value: ObjectValue::String("closed".into()),
+            }],
+            postconditions: Vec::new(),
+            allowed_roles: vec!["operator".into()],
+        });
+        state.ontology.derived_classes.push(DerivedClassDefinition {
+            name: "active_company".into(),
+            base_type: "company".into(),
+            conditions: vec![Condition {
+                property: "status".into(),
+                operator: ComparisonOperator::Equals,
+                value: Some(ObjectValue::String("active|verified".into())),
+            }],
+        });
+        state.ontology.mappings.push(SchemaMapping {
+            id: "mapping:crm".into(),
+            source_namespace: "crm".into(),
+            source_type: "customer".into(),
+            target_type: "company".into(),
+            semantic_id_template: "crm:customer:{id}".into(),
+            fields: vec![FieldMapping {
+                source_field: "legal_name".into(),
+                target_property: "name".into(),
+                transform: FieldTransform::Trim,
+            }],
+        });
+        let decoded = decode_snapshot(&encode_snapshot(&state)).unwrap();
+        assert_eq!(decoded.ontology, state.ontology);
+        assert_eq!(decoded.schema_version, 3);
     }
 }

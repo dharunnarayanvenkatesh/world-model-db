@@ -5,6 +5,7 @@ members = [
     "crates/wm-catalog",
     "crates/wm-temporal",
     "crates/wm-storage",
+    "crates/wm-ontology",
     "crates/wm-resolution",
     "crates/wm-graph",
     "crates/wm-query",

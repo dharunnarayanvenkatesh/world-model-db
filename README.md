@@ -14,8 +14,9 @@ facts, preserves conflicting evidence, tracks who or what supplied each claim,
 and can explain why the database currently believes something.
 
 V0 is a single-node Rust implementation focused on getting the semantics right:
-immutable observations, bitemporal facts, deterministic resolution, provenance,
-conflicts, temporal graph traversal, and prompt-sized context retrieval.
+immutable observations, an executable enterprise ontology, bitemporal facts,
+deterministic resolution, provenance, conflicts, temporal graph traversal, and
+prompt-sized context retrieval.
 
 > World Model DB does not claim to know objective truth. It maintains an
 > inspectable, reproducible model of what is believed, when, and why.
@@ -48,6 +49,11 @@ World Model DB makes those questions first-class database operations.
   silently discarded.
 - **Temporal graph queries** — bounded relationship paths respect validity
   windows.
+- **Executable ontology** — versioned object/link types, inheritance,
+  interfaces, domain/range/cardinality constraints, computed properties,
+  inference, guarded actions, permissions, mappings, and consistency checks.
+- **Semantic graph analysis** — reachability, weighted shortest paths,
+  PageRank/degree/betweenness, dependency blast radius, and entity resolution.
 - **Deterministic reconstruction** — rebuild current state from immutable
   history and obtain the same state digest.
 - **Multiple interfaces** — Rust crates, the `wm` CLI, a JSON REST API, and a
@@ -60,10 +66,16 @@ World Model DB makes those questions first-class database operations.
 agents / tools / sensors / documents / APIs
                     |
                     v
-          immutable observations
+       schema mappings + typed writes
                     |
                     v
-       deterministic entity + fact resolution
+       constraints + guarded actions
+                    |
+                    v
+     immutable observations + event history
+                    |
+                    v
+       deterministic fact resolution + inference
                     |
           +---------+----------+
           |                    |
@@ -73,7 +85,7 @@ agents / tools / sensors / documents / APIs
           +---------+----------+
                     |
                     v
-     context / state / WHY / diff / graph queries
+ context / WHY / semantic query / graph analysis
 ```
 
 The durable store is [`redb`](https://github.com/cberner/redb), used through a
@@ -159,13 +171,19 @@ Core agent endpoints:
 | `POST` | `/agent/memory` | Append an idempotent agent memory |
 | `POST` | `/agent/context` | Build a ranked, bounded context bundle |
 | `GET` | `/agent/sessions/:id/memory?agent_id=...` | Inspect immutable session writes |
+| `POST` | `/ontology/definitions` | Register a durable schema/rule/action/permission/mapping |
+| `POST` | `/ontology/materialize` | Materialize computed and inferred state |
+| `POST` | `/ontology/actions/:name/execute` | Execute an authorized atomic state transition |
+| `POST` | `/ontology/query` | Query typed objects without source-schema knowledge |
+| `GET` | `/ontology/consistency` | Validate the full ontology and world state |
 
 The same service exposes entities, observations, facts, conflicts, state,
 changes, world diffs, provenance, structured queries, and graph paths. Read the
 complete [API reference](docs/api.md).
 
-V0 has no built-in authentication, authorization, tenant isolation, or TLS.
-Do not expose the server directly to an untrusted network.
+The ontology layer enforces configured object/action permissions, but V0 has no
+identity provider, transport authentication, tenant isolation, or TLS. Do not
+expose the server directly to an untrusted network.
 
 ## Data model
 
@@ -182,6 +200,9 @@ fact to overwrite:
   "object": { "entity_id": "person:bob" },
   "observed_at": "2026-09-01T12:00:00Z",
   "ingested_at": "2026-09-01T12:05:00Z",
+  "claimed_valid_from": "2026-09-01T00:00:00Z",
+  "claimed_valid_to": null,
+  "cardinality": "single",
   "confidence": 0.99
 }
 ```
@@ -197,7 +218,11 @@ Every fact carries two half-open intervals:
   world.
 - `known_from <= k < known_to` — when this database believed that version.
 
-Omitted ends represent positive infinity. Timestamps are UTC RFC 3339.
+Omitted ends represent positive infinity. RFC 3339 offsets are accepted and
+normalized to UTC. Empty or inverted intervals are rejected. Resolution runs
+per valid-time segment: single-valued predicates select one candidate only
+where claims overlap, while multi-valued predicates preserve every supported
+value.
 
 ## Measured performance
 
@@ -231,6 +256,7 @@ crates/
   wm-catalog       entities, aliases, and sources
   wm-temporal      bitemporal interval semantics
   wm-storage       redb persistence, indexes, and reconstruction
+  wm-ontology      schemas, constraints, inference, actions, security, analysis
   wm-resolution    candidates, conflicts, confidence, and provenance
   wm-graph         temporal relationship traversal
   wm-query         state, history, WHY, changes, and world diffs
@@ -246,7 +272,8 @@ crates/
 V0 is an early semantic reference implementation, not yet a distributed
 database. It intentionally does not include consensus, replication, sharding,
 multi-tenancy, vector search, LLM extraction, GPU execution, or a production
-security layer.
+identity/security perimeter. Ontology permissions are deterministic policy
+evaluation, not a replacement for authenticating callers at the network edge.
 
 The OLAP boundary currently exposes dependency-free columnar batches and a
 deterministic grouped-count query. Apache DataFusion is pinned as a design
@@ -258,6 +285,7 @@ not meet this project's stricter MIT/Apache-only rule. See
 
 - [Architecture](docs/architecture.md)
 - [Agent-native design](docs/agent-native.md)
+- [Enterprise ontology runtime](docs/ontology.md)
 - [Data model](docs/data-model.md)
 - [Query semantics](docs/query-language.md)
 - [REST API](docs/api.md)

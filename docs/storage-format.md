@@ -28,11 +28,17 @@ The local representation contains, at minimum:
 4. historical fact and relationship versions;
 5. events, evidence links, conflicts, and correlations;
 6. materialized current facts and relationships;
-7. deterministic configuration/formula versions.
+7. deterministic configuration/formula versions;
+8. ontology schemas, modules, interfaces, object/link types, rules, functions,
+   actions, permissions, mappings, executions, and equivalences.
 
 ## Schema evolution
 
-V0 uses schema version `1`. A future reader must explicitly migrate an older
+V0 uses schema version `3`. Version `3` adds durable ontology-plane records.
+The reader migrates version `1` observations by
+using `observed_at` as `claimed_valid_from`, an open end, and single cardinality.
+Version `2` world-state records remain valid and load with an empty ontology
+catalog. A future reader must explicitly migrate an older
 version and retain the original until migration succeeds. Additive JSONL fields
 may be ignored only when their meaning is optional; unknown `record_type` values,
 invalid required fields, or incompatible versions are errors.

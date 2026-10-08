@@ -23,6 +23,7 @@ dependencies = [
  "wm-query",
  "wm-resolution",
  "wm-storage",
+ "wm-temporal",
 ]
 
 [[package]]
@@ -72,6 +73,15 @@ name = "wm-ingest"
 version = "0.1.0"
 
 [[package]]
+name = "wm-ontology"
+version = "0.1.0"
+dependencies = [
+ "wm-core",
+ "wm-storage",
+ "wm-temporal",
+]
+
+[[package]]
 name = "wm-query"
 version = "0.1.0"
 dependencies = [
@@ -87,6 +97,7 @@ version = "0.1.0"
 dependencies = [
  "wm-catalog",
  "wm-core",
+ "wm-ontology",
  "wm-storage",
  "wm-temporal",
 ]
@@ -99,6 +110,7 @@ dependencies = [
  "wm-core",
  "wm-graph",
  "wm-ingest",
+ "wm-ontology",
  "wm-query",
  "wm-resolution",
 ]

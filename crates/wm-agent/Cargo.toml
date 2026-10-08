@@ -9,3 +9,4 @@ wm-core = { path = "../wm-core" }
 wm-resolution = { path = "../wm-resolution" }
 wm-query = { path = "../wm-query" }
 wm-storage = { path = "../wm-storage" }
+wm-temporal = { path = "../wm-temporal" }
