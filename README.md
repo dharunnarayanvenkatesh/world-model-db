@@ -1,5 +1,12 @@
-# World Model DB
-**agent-native database for shared, evidence-backed world state**
+<div align="center">
+
+<img src="./world-model-db-logo.png" alt="World Model DB" width="820">
+
+<br>
+
+**Agent-native database for shared, evidence-backed world state**
+
+</div>
 
 World Model DB gives AI agents a durable memory that can answer more than
 "what was last written?" It stores observations, resolves them into temporal
