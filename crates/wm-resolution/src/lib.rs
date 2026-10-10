@@ -719,7 +719,9 @@ impl ResolutionEngine for Engine {
         ))?;
         validate_confidence(input.confidence)?;
         if let Some(existing) = self.store.state.observations.iter().find(|observation| {
-            observation.predicate == input.predicate && observation.cardinality != input.cardinality
+            observation.subject_entity_id == input.subject_entity_id
+                && observation.predicate == input.predicate
+                && observation.cardinality != input.cardinality
         }) {
             return Err(ResolutionError::Invalid(format!(
                 "predicate {} already uses {:?} cardinality (observation {})",

@@ -41,6 +41,9 @@ World Model DB makes those questions first-class database operations.
   tags, importance, and safe idempotent retries.
 - **Shared context** — ranked, size-bounded context bundles with agent and source
   attribution for multi-agent handoffs.
+- **Digital-twin native** — domain-neutral twins with reported and desired
+  state, telemetry metadata, bitemporal snapshots, drift, topology, and
+  auditable idempotent commands.
 - **Bitemporal state** — separate valid time (when a claim held in the world)
   from known time (when the database knew it).
 - **Evidence and provenance** — every resolved fact can be traced back to its
@@ -177,6 +180,21 @@ Core agent endpoints:
 | `POST` | `/ontology/query` | Query typed objects without source-schema knowledge |
 | `GET` | `/ontology/consistency` | Validate the full ontology and world state |
 
+Core digital-twin endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/twins` | Register any physical, virtual, biological, process, or composite twin |
+| `POST` | `/twins/:id/telemetry` | Append reported telemetry with event and ingestion time |
+| `POST` | `/twins/:id/desired` | Set evidence-backed desired state |
+| `POST` | `/twins/:id/derived` | Append calculated, predicted, or simulated state |
+| `GET` | `/twins/:id/state` | Reconstruct reported/desired/configured/derived state and drift |
+| `POST` | `/twins/:id/relationships` | Build temporal twin topology |
+| `POST` | `/twins/:id/commands` | Request an expiring, idempotent command |
+
+The [digital-twin guide](docs/digital-twins.md) covers DTDL, AAS, NGSI-LD,
+OPC UA, MQTT/Sparkplug, OTLP, and simulation adapter mappings.
+
 The same service exposes entities, observations, facts, conflicts, state,
 changes, world diffs, provenance, structured queries, and graph paths. Read the
 complete [API reference](docs/api.md).
@@ -261,6 +279,7 @@ crates/
   wm-graph         temporal relationship traversal
   wm-query         state, history, WHY, changes, and world diffs
   wm-agent         multi-agent memory and context bundles
+  wm-twin          digital-twin state, telemetry, topology, drift, and commands
   wm-ingest        JSON, JSONL, and CSV normalization
   wm-server        JSON HTTP adapter
   wm-cli           command-line adapter
@@ -286,6 +305,7 @@ not meet this project's stricter MIT/Apache-only rule. See
 - [Architecture](docs/architecture.md)
 - [Agent-native design](docs/agent-native.md)
 - [Enterprise ontology runtime](docs/ontology.md)
+- [Digital-twin model and interoperability](docs/digital-twins.md)
 - [Data model](docs/data-model.md)
 - [Query semantics](docs/query-language.md)
 - [REST API](docs/api.md)

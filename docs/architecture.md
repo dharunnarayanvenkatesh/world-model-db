@@ -125,6 +125,15 @@ resolution / conflicts / bitemporal world state
       compact shared context bundles
 ```
 
+### `wm-twin`
+
+Maps protocol-neutral digital-twin operations onto the canonical entity,
+observation, fact, relationship, event, conflict, and provenance model. It owns
+the reported/desired/configuration/derived channel convention, state drift,
+twin topology, adapter identity, and idempotent command lifecycle. It does not
+embed OPC UA, MQTT, OTLP, DTDL, AAS, NGSI-LD, or simulation runtimes; replaceable
+adapters translate those ecosystems at the boundary.
+
 ### `wm-ingest`
 
 Parses JSON, JSONL, and CSV into domain commands. Transport-specific field names

@@ -19,6 +19,10 @@ use wm_ontology::{
     shortest_semantic_path,
 };
 use wm_resolution::{Engine, NewObservation, ResolutionEngine};
+use wm_twin::{
+    CommandStatus, TwinChannel, TwinCommandRequest, TwinDefinition, TwinGateway, TwinLink,
+    TwinSignalWrite,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -78,7 +82,7 @@ fn route(engine: &mut Engine, request: Request) -> Response {
         match (request.method.as_str(), segments.as_slice()) {
             ("GET", []) => Ok((
                 200,
-                "{\"name\":\"World Model DB\",\"api_version\":\"v1\",\"agent_native\":true,\"capabilities\":[\"shared_memory\",\"bitemporal_context\",\"provenance\",\"conflicts\",\"multi_agent\",\"typed_ontology\",\"inference\",\"guarded_actions\",\"object_security\",\"semantic_graph\"]}".into(),
+                "{\"name\":\"World Model DB\",\"api_version\":\"v1\",\"agent_native\":true,\"capabilities\":[\"shared_memory\",\"bitemporal_context\",\"provenance\",\"conflicts\",\"multi_agent\",\"typed_ontology\",\"inference\",\"guarded_actions\",\"object_security\",\"semantic_graph\",\"digital_twins\",\"reported_desired_state\",\"twin_commands\"]}".into(),
             )),
             ("GET", ["agent", "tools"]) => Ok((200, wm_agent::tool_manifest_json().into())),
             ("POST", ["agent", "register"]) => post_agent_register(engine, &request.body),
@@ -86,6 +90,32 @@ fn route(engine: &mut Engine, request: Request) -> Response {
             ("POST", ["agent", "context"]) => post_agent_context(engine, &request.body),
             ("GET", ["agent", "sessions", session_id, "memory"]) => {
                 get_agent_session_memory(engine, session_id, &request.query)
+            }
+            ("POST", ["twins"]) => post_twin(engine, &request.body),
+            ("GET", ["twins"]) => list_twins(engine),
+            ("GET", ["twins", id]) => get_twin(engine, id),
+            ("POST", ["twins", id, "telemetry"]) => {
+                post_twin_signal(engine, id, TwinChannel::Reported, &request.body)
+            }
+            ("POST", ["twins", id, "desired"]) => {
+                post_twin_signal(engine, id, TwinChannel::Desired, &request.body)
+            }
+            ("POST", ["twins", id, "configuration"]) => {
+                post_twin_signal(engine, id, TwinChannel::Configuration, &request.body)
+            }
+            ("POST", ["twins", id, "derived"]) => {
+                post_twin_signal(engine, id, TwinChannel::Derived, &request.body)
+            }
+            ("GET", ["twins", id, "state"]) => twin_state(engine, id, &request.query),
+            ("POST", ["twins", id, "relationships"]) => {
+                post_twin_relationship(engine, id, &request.body)
+            }
+            ("POST", ["twins", id, "commands"]) => {
+                post_twin_command(engine, id, &request.body)
+            }
+            ("GET", ["twins", id, "commands"]) => list_twin_commands(engine, id),
+            ("POST", ["twins", id, "commands", command_id, "ack"]) => {
+                acknowledge_twin_command(engine, id, command_id, &request.body)
             }
             ("POST", ["entities"]) => post_entity(engine, &request.body),
             ("GET", ["entities", id]) => get_entity(engine, id),
@@ -275,6 +305,250 @@ fn get_agent_session_memory(
         .ok_or((400, "agent_id query parameter is required".into()))?;
     let memories = AgentGateway::new(engine).session_memory(agent_id, session_id);
     Ok((200, session_memory_json(&memories)))
+}
+
+fn post_twin(engine: &mut Engine, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let twin_kind = required_any(&mut values, &["twin_kind", "kind"])?;
+    let name = required_any(&mut values, &["name", "canonical_name"])?;
+    let aliases = values
+        .remove("aliases")
+        .map(|raw| string_list(&raw))
+        .unwrap_or_default();
+    let capabilities = values
+        .remove("capabilities")
+        .map(|raw| string_list(&raw))
+        .unwrap_or_default();
+    let external_ids = values
+        .remove("external_ids")
+        .map(|raw| wm_ingest::parse_object(&raw).map_err(|error| (400, error.to_string())))
+        .transpose()?
+        .unwrap_or_default();
+    let mut metadata = BTreeMap::new();
+    if let Some(raw) = values.remove("metadata") {
+        metadata.insert("twin.metadata".into(), ObjectValue::Json(raw));
+    }
+    let id = TwinGateway::new(engine)
+        .register(TwinDefinition {
+            twin_kind,
+            name,
+            aliases,
+            model_id: values.remove("model_id"),
+            schema_version: values.remove("schema_version"),
+            capabilities,
+            external_ids,
+            metadata,
+        })
+        .map_err(twin_error)?;
+    get_twin(engine, id.as_str()).map(|(_, body)| (201, body))
+}
+
+fn list_twins(engine: &mut Engine) -> ApiResult {
+    let gateway = TwinGateway::new(engine);
+    Ok((200, wm_twin::twins_json(&gateway.twins())))
+}
+
+fn get_twin(engine: &Engine, id: &str) -> ApiResult {
+    engine
+        .store
+        .state
+        .entities
+        .iter()
+        .find(|entity| entity.id.as_str() == id && entity.entity_type == wm_twin::TWIN_ENTITY_TYPE)
+        .map(|entity| (200, wm_twin::twin_json(entity)))
+        .ok_or((404, format!("digital twin {id} not found")))
+}
+
+fn post_twin_signal(engine: &mut Engine, id: &str, channel: TwinChannel, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let signal = required_any(&mut values, &["signal", "property", "name"])?;
+    let raw_value = required_any(&mut values, &["value", "object"])?;
+    let observed_at = required_any(&mut values, &["observed_at", "timestamp"])?;
+    let value = agent_object(&raw_value, values.remove("value_type").as_deref())?;
+    let confidence = number(&mut values, "confidence", 1.0)?;
+    let cardinality =
+        parse_cardinality(values.remove("cardinality").as_deref().unwrap_or("single"))?;
+    let supplied_source = values.remove("source_id");
+    let adapter_id = values.remove("adapter_id").unwrap_or_else(|| "rest".into());
+    let protocol = values
+        .remove("protocol")
+        .unwrap_or_else(|| "http-json".into());
+    let priority = values
+        .remove("source_priority")
+        .map(|raw| raw.parse::<i32>())
+        .transpose()
+        .map_err(|_| (400, "source_priority must be an integer".into()))?
+        .unwrap_or(0);
+    let mut gateway = TwinGateway::new(engine);
+    let source_id = match supplied_source {
+        Some(source_id) => SourceId::from(source_id),
+        None => gateway
+            .ensure_adapter_source(&adapter_id, &protocol, priority)
+            .map_err(twin_error)?,
+    };
+    let observation_id = gateway
+        .write_signal(
+            &EntityId::from(id),
+            source_id,
+            channel,
+            TwinSignalWrite {
+                signal,
+                value,
+                observed_at,
+                ingested_at: values.remove("ingested_at"),
+                valid_from: values
+                    .remove("valid_from")
+                    .or_else(|| values.remove("claimed_valid_from")),
+                valid_to: values
+                    .remove("valid_to")
+                    .or_else(|| values.remove("claimed_valid_to")),
+                confidence,
+                cardinality,
+                unit: values.remove("unit"),
+                quality: values.remove("quality"),
+                sequence: values.remove("sequence"),
+                raw_payload: values
+                    .remove("raw_payload")
+                    .unwrap_or_else(|| body.to_owned()),
+            },
+        )
+        .map_err(twin_error)?;
+    Ok((
+        201,
+        format!(
+            "{{\"observation_id\":\"{}\",\"channel\":\"{}\"}}",
+            json_escape(observation_id.as_str()),
+            channel.as_str()
+        ),
+    ))
+}
+
+fn twin_state(engine: &mut Engine, id: &str, query: &BTreeMap<String, String>) -> ApiResult {
+    let gateway = TwinGateway::new(engine);
+    let snapshot = gateway
+        .snapshot(
+            &EntityId::from(id),
+            query.get("valid_at").map(String::as_str),
+            query.get("known_at").map(String::as_str),
+        )
+        .map_err(twin_error)?;
+    Ok((200, wm_twin::snapshot_json(&snapshot)))
+}
+
+fn post_twin_relationship(engine: &mut Engine, id: &str, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let relationship_type = required_any(&mut values, &["relationship_type", "type"])?;
+    let target_twin_id = required_any(&mut values, &["target_twin_id", "target"])?;
+    let valid_from = values
+        .remove("valid_from")
+        .unwrap_or_else(wm_resolution::now_utc);
+    let confidence = number(&mut values, "confidence", 1.0)?;
+    let evidence = values
+        .remove("observation_ids")
+        .map(|raw| string_list(&raw).into_iter().map(Into::into).collect())
+        .unwrap_or_default();
+    let relationship_id = TwinGateway::new(engine)
+        .connect(
+            &EntityId::from(id),
+            TwinLink {
+                relationship_type,
+                target_twin_id: target_twin_id.into(),
+                valid_from,
+                valid_to: values.remove("valid_to"),
+                confidence,
+                evidence,
+            },
+        )
+        .map_err(twin_error)?;
+    Ok((
+        201,
+        format!(
+            "{{\"relationship_id\":\"{}\"}}",
+            json_escape(relationship_id.as_str())
+        ),
+    ))
+}
+
+fn post_twin_command(engine: &mut Engine, id: &str, body: &str) -> ApiResult {
+    let mut values = fields(body)?;
+    let command_type = required_any(&mut values, &["command_type", "type"])?;
+    let requested_by = required_any(&mut values, &["requested_by", "actor"])?;
+    let idempotency_key = required_any(&mut values, &["idempotency_key", "key"])?;
+    let requested_at = values
+        .remove("requested_at")
+        .unwrap_or_else(wm_resolution::now_utc);
+    let mut parameters = BTreeMap::new();
+    if let Some(raw) = values.remove("parameters") {
+        parameters.insert("twin.parameters".into(), ObjectValue::Json(raw));
+    }
+    let receipt = TwinGateway::new(engine)
+        .request_command(
+            &EntityId::from(id),
+            TwinCommandRequest {
+                command_type,
+                requested_by,
+                requested_at,
+                expires_at: values.remove("expires_at"),
+                idempotency_key,
+                parameters,
+            },
+        )
+        .map_err(twin_error)?;
+    Ok((
+        if receipt.replayed { 200 } else { 201 },
+        format!(
+            "{{\"command_id\":\"{}\",\"replayed\":{}}}",
+            json_escape(receipt.command_id.as_str()),
+            receipt.replayed
+        ),
+    ))
+}
+
+fn acknowledge_twin_command(
+    engine: &mut Engine,
+    id: &str,
+    command_id: &str,
+    body: &str,
+) -> ApiResult {
+    let mut values = fields(body)?;
+    let status = match required_any(&mut values, &["status"])?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "accepted" => CommandStatus::Accepted,
+        "running" => CommandStatus::Running,
+        "succeeded" | "success" => CommandStatus::Succeeded,
+        "failed" | "failure" => CommandStatus::Failed,
+        "rejected" => CommandStatus::Rejected,
+        "cancelled" | "canceled" => CommandStatus::Cancelled,
+        _ => {
+            return Err((
+                400,
+                "status must be accepted, running, succeeded, failed, rejected, or cancelled"
+                    .into(),
+            ));
+        }
+    };
+    let event_id = TwinGateway::new(engine)
+        .acknowledge_command(
+            &EntityId::from(id),
+            &EventId::from(command_id),
+            status,
+            values.remove("at").unwrap_or_else(wm_resolution::now_utc),
+            values.remove("message"),
+        )
+        .map_err(twin_error)?;
+    Ok((
+        201,
+        format!("{{\"event_id\":\"{}\"}}", json_escape(event_id.as_str())),
+    ))
+}
+
+fn list_twin_commands(engine: &mut Engine, id: &str) -> ApiResult {
+    let events = TwinGateway::new(engine)
+        .commands(&EntityId::from(id))
+        .map_err(twin_error)?;
+    Ok((200, wm_twin::events_json(&events)))
 }
 
 fn post_entity(engine: &mut Engine, body: &str) -> ApiResult {
@@ -1312,6 +1586,14 @@ fn agent_error(error: wm_agent::AgentError) -> (u16, String) {
         wm_agent::AgentError::Storage(message) => (500, message),
     }
 }
+
+fn twin_error(error: wm_twin::TwinError) -> (u16, String) {
+    match error {
+        wm_twin::TwinError::Invalid(message) => (400, message),
+        wm_twin::TwinError::NotFound(message) => (404, message),
+        wm_twin::TwinError::Engine(error) => engine_error(error),
+    }
+}
 fn string_list(raw: &str) -> Vec<String> {
     raw.trim()
         .trim_start_matches('[')
@@ -1604,6 +1886,83 @@ mod tests {
         assert_eq!(engine.store.state.ontology.actions.len(), 1);
         assert_eq!(engine.store.state.ontology.mappings.len(), 1);
         assert_eq!(engine.store.state.ontology.action_executions.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn twin_routes_cover_registration_state_drift_and_commands() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("wm-server-twin-{nonce}.redb"));
+        {
+            let mut engine = Engine::init(&path).unwrap();
+            let created = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/twins",
+                    r#"{"kind":"industrial.pump","name":"Pump 7","model_id":"dtmi:example:pump;1","capabilities":["telemetry","commands"]}"#,
+                ),
+            );
+            assert_eq!(created.status, 201);
+            assert!(created.body.contains("digital-twin:pump-7"));
+
+            let telemetry = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/twins/digital-twin:pump-7/telemetry",
+                    r#"{"signal":"rpm","value":"1450","value_type":"integer","observed_at":"2026-10-11T09:00:00Z","unit":"rpm","adapter_id":"opcua-1","protocol":"opcua"}"#,
+                ),
+            );
+            assert_eq!(telemetry.status, 201);
+            let desired = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/twins/digital-twin:pump-7/desired",
+                    r#"{"signal":"rpm","value":"1500","value_type":"integer","observed_at":"2026-10-11T09:00:01Z","adapter_id":"controller-1","protocol":"agent"}"#,
+                ),
+            );
+            assert_eq!(desired.status, 201);
+            let state = route(
+                &mut engine,
+                request("GET", "/twins/digital-twin:pump-7/state", ""),
+            );
+            assert_eq!(state.status, 200);
+            assert!(state.body.contains("\"reported\":{\"rpm\":1450}"));
+            assert!(state.body.contains("\"desired\":{\"rpm\":1500}"));
+            assert!(state.body.contains("\"drift\":[{"));
+
+            let command = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/twins/digital-twin:pump-7/commands",
+                    r#"{"type":"set_speed","requested_by":"agent:operator","key":"run-1-step-1","requested_at":"2026-10-11T09:01:00Z","parameters":{"rpm":1500}}"#,
+                ),
+            );
+            assert_eq!(command.status, 201);
+            assert!(command.body.contains("event:1"));
+            let acknowledgement = route(
+                &mut engine,
+                request(
+                    "POST",
+                    "/twins/digital-twin:pump-7/commands/event:1/ack",
+                    r#"{"status":"succeeded","at":"2026-10-11T09:01:03Z"}"#,
+                ),
+            );
+            assert_eq!(acknowledgement.status, 201);
+            let commands = route(
+                &mut engine,
+                request("GET", "/twins/digital-twin:pump-7/commands", ""),
+            );
+            assert_eq!(commands.status, 200);
+            assert!(commands.body.contains("twin.command.requested"));
+            assert!(commands.body.contains("twin.command.succeeded"));
+        }
         std::fs::remove_file(path).unwrap();
     }
 }

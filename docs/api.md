@@ -12,6 +12,18 @@ as the CLI. Business rules reside below the transport layer.
 | `POST` | `/agent/memory` | append an idempotent agent memory |
 | `POST` | `/agent/context` | build a ranked, size-bounded context bundle |
 | `GET` | `/agent/sessions/:id/memory?agent_id=...` | inspect an agent session's immutable writes |
+| `POST` | `/twins` | register a domain-neutral digital twin |
+| `GET` | `/twins` | list digital twins |
+| `GET` | `/twins/:id` | get twin identity and model metadata |
+| `POST` | `/twins/:id/telemetry` | append reported telemetry |
+| `POST` | `/twins/:id/desired` | append desired/control-plane state |
+| `POST` | `/twins/:id/configuration` | append configuration state |
+| `POST` | `/twins/:id/derived` | append calculated, predicted, or simulated state |
+| `GET` | `/twins/:id/state` | get bitemporal twin state and drift |
+| `POST` | `/twins/:id/relationships` | connect twins with a temporal typed link |
+| `POST` | `/twins/:id/commands` | request an idempotent, expiring command |
+| `GET` | `/twins/:id/commands` | inspect command lifecycle events |
+| `POST` | `/twins/:id/commands/:command_id/ack` | acknowledge command progress or completion |
 | `POST` | `/entities` | create an entity |
 | `GET` | `/entities/:id` | get an entity |
 | `POST` | `/observations` | append an immutable observation |
@@ -79,6 +91,15 @@ mismatches, and incompatible cardinality before appending the observation.
 The ontology endpoints, compact definition syntax, action semantics,
 permissions, mappings, inference, and graph analysis are documented in the
 [ontology runtime guide](ontology.md).
+
+## Digital twins
+
+Twin endpoints use the same entity, observation, fact, relationship, event,
+conflict, provenance, and bitemporal query semantics as the rest of the API.
+They add reported/desired/configuration/derived channels, drift calculation,
+adapter metadata, topology, and command lifecycle events. See the
+[digital-twin guide](digital-twins.md) for complete requests and standards
+mapping.
 
 ## Agent memory
 

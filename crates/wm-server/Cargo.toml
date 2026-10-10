@@ -15,4 +15,5 @@ wm-query = { path = "../wm-query" }
 wm-graph = { path = "../wm-graph" }
 wm-ingest = { path = "../wm-ingest" }
 wm-agent = { path = "../wm-agent" }
+wm-twin = { path = "../wm-twin" }
 wm-ontology = { path = "../wm-ontology" }

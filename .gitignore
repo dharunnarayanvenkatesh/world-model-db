@@ -3,6 +3,7 @@
 *.wmdb
 *.wmdb.tmp
 *.redb
+benchmarks/spytime/dataset-*.csv
 .DS_Store
 Thumbs.db
 .idea/

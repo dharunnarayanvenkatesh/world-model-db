@@ -32,6 +32,17 @@ resolution. Retirement closes availability; it does not delete the entity.
 When an ontology type is registered, entity attributes are validated against
 its inherited property and interface contracts on every write.
 
+### Digital twin profile
+
+A digital twin is an entity with `entity_type = digital_twin`. Its domain kind,
+external model, schema version, capabilities, and ecosystem identifiers are
+entity attributes. Dynamic state is never stored by mutating those attributes:
+it is expressed through immutable observations in the `reported`, `desired`,
+`configuration`, and `derived` channels. Twin topology uses ordinary temporal
+relationships, and control requests use events with idempotent command keys.
+Consequently every existing `STATE`, `WHY`, changes, graph, conflict, and
+bitemporal operation also works for twins.
+
 ## Ontology catalog
 
 The durable ontology plane contains schema versions, namespace modules,

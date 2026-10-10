@@ -113,6 +113,7 @@ dependencies = [
  "wm-ontology",
  "wm-query",
  "wm-resolution",
+ "wm-twin",
 ]
 
 [[package]]
@@ -126,3 +127,12 @@ dependencies = [
 [[package]]
 name = "wm-temporal"
 version = "0.1.0"
+
+[[package]]
+name = "wm-twin"
+version = "0.1.0"
+dependencies = [
+ "wm-core",
+ "wm-query",
+ "wm-resolution",
+]

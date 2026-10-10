@@ -8,9 +8,12 @@ license.workspace = true
 name = "wm-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "wm-spytime"
+path = "src/spytime.rs"
+
 [dependencies]
 wm-core = { path = "../wm-core" }
 wm-resolution = { path = "../wm-resolution" }
 wm-query = { path = "../wm-query" }
 wm-graph = { path = "../wm-graph" }
-
